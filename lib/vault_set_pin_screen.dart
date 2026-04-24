@@ -65,9 +65,11 @@ class _VaultSetPinScreenState extends State<VaultSetPinScreen>
     } else {
       if (_pin.join() == _firstPin!.join()) {
         VaultService.setPin(_pin.join()).then((_) {
-          if (mounted) Navigator.of(context).pushReplacement(
+          if (mounted) {
+            Navigator.of(context).pushReplacement(
             MaterialPageRoute(builder: (_) => const VaultPinReadyScreen()),
           );
+          }
         });
       } else {
         HapticFeedback.heavyImpact();

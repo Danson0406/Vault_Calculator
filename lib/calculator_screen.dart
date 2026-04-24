@@ -72,8 +72,9 @@ class _CalculatorScreenState extends State<CalculatorScreen> {
           _operator = null; _shouldResetDisplay = false;
           break;
         case '+/-':
-          if (_display != '0')
+          if (_display != '0') {
             _display = _display.startsWith('-') ? _display.substring(1) : '-$_display';
+          }
           break;
         case '%':
           _display = _fmt((double.tryParse(_display) ?? 0) / 100); break;
@@ -104,7 +105,9 @@ class _CalculatorScreenState extends State<CalculatorScreen> {
         case 'Rand': _display = _fmt(Random().nextDouble()); _shouldResetDisplay = true; return;
         default:
           if (_shouldResetDisplay) { _display = label; _shouldResetDisplay = false; }
-          else _display = _display == '0' ? label : '$_display$label';
+          else {
+            _display = _display == '0' ? label : '$_display$label';
+          }
           if (_display.length > 10) _display = _display.substring(0, 10);
       }
     });
