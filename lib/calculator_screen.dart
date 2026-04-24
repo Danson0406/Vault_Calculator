@@ -7,11 +7,10 @@ import 'vault_service.dart';
 
 class CalculatorScreen extends StatefulWidget {
   const CalculatorScreen({super.key});
-
   @override
   State<CalculatorScreen> createState() => _CalculatorScreenState();
 }
-
+ 
 class _CalculatorScreenState extends State<CalculatorScreen> {
   String _display = '0';
   String _expression = '';
@@ -20,361 +19,291 @@ class _CalculatorScreenState extends State<CalculatorScreen> {
   bool _shouldResetDisplay = false;
   int _xPressCount = 0;
   DateTime? _lastXPress;
-
-  // Secret trigger: press × three times quickly
+  bool _isScientific = false;
+ 
+  static const _orange  = Color(0xFFFF9F0A);
+  static const _dark    = Color(0xFF333333);
+  static const _light   = Color(0xFFA5A5A5);
+  static const _sciColor= Color(0xFF1C1C1E);
+ 
+  // ── Fixed, cross-platform safe sizes ───────────────────────────
+  static const double _kBtnSize   = 72.0;  // circle button diameter
+  static const double _kBtnFont   = 28.0;  // number/op label inside button
+  static const double _kSciBtnH   = 40.0;  // scientific row button height
+  static const double _kSciBtnFont= 13.0;  // scientific label font
+  static const double _kDisplayFont = 64.0; // main result display
+  static const double _kExprFont  = 18.0;  // secondary expression
+  static const double _kGap       = 10.0;  // gap between buttons
+ 
+  // ── Vault trigger ───────────────────────────────────────────────
   void _handleXPress() async {
     final now = DateTime.now();
-    if (_lastXPress != null && now.difference(_lastXPress!).inSeconds > 3) {
-      _xPressCount = 0;
-    }
+    if (_lastXPress != null && now.difference(_lastXPress!).inSeconds > 3) _xPressCount = 0;
     _lastXPress = now;
     _xPressCount++;
-
     if (_xPressCount >= 3) {
       _xPressCount = 0;
       HapticFeedback.heavyImpact();
-      await Future.delayed(const Duration(milliseconds: 100));
+      await Future.delayed(const Duration(milliseconds: 80));
       _openVault();
       return;
     }
-
-    // Normal × behavior
     _handleOperator('×');
   }
-
+ 
   void _openVault() async {
     final isSetup = await VaultService.isVaultSetup();
     if (!mounted) return;
-
-    Navigator.of(context).push(
-      PageRouteBuilder(
-        pageBuilder: (context, animation, secondaryAnimation) =>
-            isSetup ? const VaultPinLoginScreen() : const VaultWelcomeScreen(),
-        transitionsBuilder: (context, animation, secondaryAnimation, child) {
-          return FadeTransition(opacity: animation, child: child);
-        },
-        transitionDuration: const Duration(milliseconds: 400),
-      ),
-    );
+    Navigator.of(context).push(PageRouteBuilder(
+      pageBuilder: (_, __, ___) =>
+          isSetup ? const VaultPinLoginScreen() : const VaultWelcomeScreen(),
+      transitionsBuilder: (_, anim, __, child) => FadeTransition(opacity: anim, child: child),
+      transitionDuration: const Duration(milliseconds: 350),
+    ));
   }
-
-  void _handleButton(String label) {
+ 
+  // ── Button logic ─────────────────────────────────────────────────
+  void _tap(String label) {
     HapticFeedback.lightImpact();
     setState(() {
-      if (label == 'AC' || label == 'C') {
-        _display = '0';
-        _expression = '';
-        _firstOperand = null;
-        _operator = null;
-        _shouldResetDisplay = false;
-      } else if (label == '+/-') {
-        if (_display != '0') {
-          if (_display.startsWith('-')) {
-            _display = _display.substring(1);
-          } else {
-            _display = '-$_display';
-          }
-        }
-      } else if (label == '%') {
-        final val = double.tryParse(_display) ?? 0;
-        _display = _formatResult(val / 100);
-      } else if (['+', '-', '×', '÷'].contains(label)) {
-        if (label == '×') {
-          _handleXPress();
-          return;
-        }
-        _handleOperator(label);
-      } else if (label == '=') {
-        _calculateResult();
-      } else if (label == '.') {
-        if (_shouldResetDisplay) {
-          _display = '0.';
-          _shouldResetDisplay = false;
-        } else if (!_display.contains('.')) {
-          _display = '$_display.';
-        }
-      } else if (label == 'sin' ||
-          label == 'cos' ||
-          label == 'tan' ||
-          label == 'sin⁻¹' ||
-          label == 'cos⁻¹' ||
-          label == 'tan⁻¹') {
-        _applyTrig(label);
-      } else if (label == 'xʸ') {
-        _handleOperator('^');
-      } else if (label == '√x') {
-        final val = double.tryParse(_display) ?? 0;
-        _display = _formatResult(sqrt(val));
-      } else if (label == 'x²') {
-        final val = double.tryParse(_display) ?? 0;
-        _display = _formatResult(val * val);
-      } else if (label == '1/x') {
-        final val = double.tryParse(_display) ?? 0;
-        _display = val != 0 ? _formatResult(1 / val) : 'Error';
-      } else if (label == 'ln') {
-        final val = double.tryParse(_display) ?? 0;
-        _display = _formatResult(log(val));
-      } else if (label == 'log₁₀') {
-        final val = double.tryParse(_display) ?? 0;
-        _display = _formatResult(log(val) / log(10));
-      } else if (label == 'eˣ') {
-        final val = double.tryParse(_display) ?? 0;
-        _display = _formatResult(exp(val));
-      } else if (label == '10ˣ') {
-        final val = double.tryParse(_display) ?? 0;
-        _display = _formatResult(pow(10, val).toDouble());
-      } else if (label == 'π') {
-        _display = _formatResult(pi);
-        _shouldResetDisplay = true;
-      } else if (label == 'e') {
-        _display = _formatResult(e);
-        _shouldResetDisplay = true;
-      } else if (label == 'Rand') {
-        _display = _formatResult(Random().nextDouble());
-        _shouldResetDisplay = true;
-      } else if (label == '(' || label == ')') {
-        // Simplified parentheses handling
-      } else {
-        // Number input
-        if (_shouldResetDisplay) {
-          _display = label;
-          _shouldResetDisplay = false;
-        } else {
-          _display = _display == '0' ? label : '$_display$label';
-        }
-        if (_display.length > 12) {
-          _display = _display.substring(0, 12);
-        }
+      switch (label) {
+        case 'AC':
+          _display = '0'; _expression = ''; _firstOperand = null;
+          _operator = null; _shouldResetDisplay = false;
+          break;
+        case '+/-':
+          if (_display != '0')
+            _display = _display.startsWith('-') ? _display.substring(1) : '-$_display';
+          break;
+        case '%':
+          _display = _fmt((double.tryParse(_display) ?? 0) / 100); break;
+        case '÷': case '-': case '+':
+          _handleOperator(label); break;
+        case '×': _handleXPress(); return;
+        case '=': _calcResult(); break;
+        case '.':
+          if (_shouldResetDisplay) { _display = '0.'; _shouldResetDisplay = false; }
+          else if (!_display.contains('.')) _display = '$_display.';
+          break;
+        case 'xʸ': _handleOperator('^'); break;
+        case 'x²': _display = _fmt(pow(double.tryParse(_display)??0, 2).toDouble()); break;
+        case 'x³': _display = _fmt(pow(double.tryParse(_display)??0, 3).toDouble()); break;
+        case '√x': _display = _fmt(sqrt(double.tryParse(_display)??0)); break;
+        case '1/x':
+          final v = double.tryParse(_display)??0;
+          _display = v != 0 ? _fmt(1/v) : 'Error'; break;
+        case 'ln':  _display = _fmt(log(double.tryParse(_display)??0)); break;
+        case 'log': _display = _fmt(log(double.tryParse(_display)??0)/log(10)); break;
+        case 'eˣ': _display = _fmt(exp(double.tryParse(_display)??0)); break;
+        case '10ˣ': _display = _fmt(pow(10, double.tryParse(_display)??0).toDouble()); break;
+        case 'sin': _display = _fmt(sin((double.tryParse(_display)??0)*pi/180)); break;
+        case 'cos': _display = _fmt(cos((double.tryParse(_display)??0)*pi/180)); break;
+        case 'tan': _display = _fmt(tan((double.tryParse(_display)??0)*pi/180)); break;
+        case 'π': _display = _fmt(pi); _shouldResetDisplay = true; return;
+        case 'e': _display = _fmt(e); _shouldResetDisplay = true; return;
+        case 'Rand': _display = _fmt(Random().nextDouble()); _shouldResetDisplay = true; return;
+        default:
+          if (_shouldResetDisplay) { _display = label; _shouldResetDisplay = false; }
+          else _display = _display == '0' ? label : '$_display$label';
+          if (_display.length > 10) _display = _display.substring(0, 10);
       }
     });
   }
-
+ 
   void _handleOperator(String op) {
     _firstOperand = double.tryParse(_display);
-    _operator = op;
-    _expression = '$_display $op';
-    _shouldResetDisplay = true;
+    _operator = op; _expression = '$_display $op'; _shouldResetDisplay = true;
   }
-
-  void _calculateResult() {
+ 
+  void _calcResult() {
     if (_firstOperand == null || _operator == null) return;
-    final secondOperand = double.tryParse(_display) ?? 0;
-    double result;
+    final b = double.tryParse(_display) ?? 0;
+    double r;
     switch (_operator) {
-      case '+':
-        result = _firstOperand! + secondOperand;
-        break;
-      case '-':
-        result = _firstOperand! - secondOperand;
-        break;
-      case '×':
-        result = _firstOperand! * secondOperand;
-        break;
-      case '÷':
-        result = secondOperand != 0 ? _firstOperand! / secondOperand : 0;
-        break;
-      case '^':
-        result = pow(_firstOperand!, secondOperand).toDouble();
-        break;
-      default:
-        return;
+      case '+': r = _firstOperand! + b; break;
+      case '-': r = _firstOperand! - b; break;
+      case '×': r = _firstOperand! * b; break;
+      case '÷': r = b != 0 ? _firstOperand! / b : double.nan; break;
+      case '^': r = pow(_firstOperand!, b).toDouble(); break;
+      default: return;
     }
-    _expression = '';
-    _display = _formatResult(result);
-    _firstOperand = null;
-    _operator = null;
-    _shouldResetDisplay = true;
+    _expression = ''; _display = _fmt(r);
+    _firstOperand = null; _operator = null; _shouldResetDisplay = true;
   }
-
-  void _applyTrig(String func) {
-    final val = double.tryParse(_display) ?? 0;
-    double result;
-    switch (func) {
-      case 'sin':
-        result = sin(val * pi / 180);
-        break;
-      case 'cos':
-        result = cos(val * pi / 180);
-        break;
-      case 'tan':
-        result = tan(val * pi / 180);
-        break;
-      case 'sin⁻¹':
-        result = asin(val) * 180 / pi;
-        break;
-      case 'cos⁻¹':
-        result = acos(val) * 180 / pi;
-        break;
-      case 'tan⁻¹':
-        result = atan(val) * 180 / pi;
-        break;
-      default:
-        return;
-    }
-    setState(() => _display = _formatResult(result));
+ 
+  String _fmt(double v) {
+    if (v.isNaN || v.isInfinite) return 'Error';
+    if (v == v.truncateToDouble() && v.abs() < 1e10) return v.toInt().toString();
+    return double.parse(v.toStringAsFixed(8)).toString();
   }
-
-  String _formatResult(double val) {
-    if (val.isNaN || val.isInfinite) return 'Error';
-    if (val == val.truncateToDouble() && val.abs() < 1e12) {
-      return val.toInt().toString();
-    }
-    return val.toStringAsPrecision(8).replaceAll(RegExp(r'0+$'), '').replaceAll(RegExp(r'\.$'), '');
-  }
-
+ 
+  // ── BUILD ────────────────────────────────────────────────────────
   @override
   Widget build(BuildContext context) {
+    // Constrain total width to phone-like 420px max so it looks good on web/tablet too
     return Scaffold(
       backgroundColor: Colors.black,
       body: SafeArea(
-        child: Column(
-          children: [
-            // Display
-            Expanded(
-              flex: 3,
-              child: Container(
-                alignment: Alignment.bottomRight,
-                padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.end,
-                  crossAxisAlignment: CrossAxisAlignment.end,
-                  children: [
-                    if (_expression.isNotEmpty)
-                      Text(
-                        _expression,
-                        style: const TextStyle(
-                          color: Color(0xFF888888),
-                          fontSize: 20,
-                        ),
+        child: Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 420),
+            child: Column(
+              children: [
+                // ── Display area ──────────────────────────────────
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.fromLTRB(20, 20, 20, 12),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.end,
+                    children: [
+                      if (_expression.isNotEmpty)
+                        Text(_expression,
+                            style: const TextStyle(
+                                color: Color(0xFF888888), fontSize: _kExprFont)),
+                      const SizedBox(height: 4),
+                      FittedBox(
+                        fit: BoxFit.scaleDown,
+                        alignment: Alignment.centerRight,
+                        child: Text(_display,
+                            style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: _kDisplayFont,
+                                fontWeight: FontWeight.w200,
+                                letterSpacing: -1.5)),
                       ),
-                    const SizedBox(height: 4),
-                    FittedBox(
-                      fit: BoxFit.scaleDown,
-                      child: Text(
-                        _display,
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 72,
-                          fontWeight: FontWeight.w300,
-                          letterSpacing: -2,
-                        ),
-                      ),
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
-              ),
-            ),
-            // Scientific row hint
-            const Divider(color: Color(0xFF222222), height: 1),
-            // Buttons
-            Expanded(
-              flex: 7,
-              child: _buildButtonGrid(),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildButtonGrid() {
-    // iOS-style calculator layout (scientific)
-    final scientificRow = [
-      ['(', ')', 'mc', 'm+', 'm-', 'mr'],
-      ['2ⁿᵈ', 'x²', 'x³', 'xʸ', 'eˣ', '10ˣ'],
-      ['1/x', '√x', '∛x', 'ʸ√x', 'ln', 'log₁₀'],
-      ['x!', 'sin', 'cos', 'tan', 'e', 'EE'],
-      ['Rad', 'sinh', 'cosh', 'tanh', 'π', 'Rand'],
-    ];
-
-    final mainButtons = [
-      ['AC', '+/-', '%', '÷'],
-      ['7', '8', '9', '×'],
-      ['4', '5', '6', '-'],
-      ['1', '2', '3', '+'],
-      ['0', '.', '='],
-    ];
-
-    return Column(
-      children: [
-        // Scientific rows
-        ...scientificRow.map((row) => Expanded(
-              child: Row(
-                children: row.map((label) => _buildScientificButton(label)).toList(),
-              ),
-            )),
-        // Main rows
-        ...mainButtons.map((row) => Expanded(
-              child: Row(
-                children: row.map((label) => _buildMainButton(label)).toList(),
-              ),
-            )),
-      ],
-    );
-  }
-
-  Widget _buildScientificButton(String label) {
-    return Expanded(
-      child: GestureDetector(
-        onTap: () => _handleButton(label),
-        child: Container(
-          margin: const EdgeInsets.all(1),
-          decoration: BoxDecoration(
-            color: const Color(0xFF1C1C1E),
-            borderRadius: BorderRadius.circular(8),
-          ),
-          child: Center(
-            child: Text(
-              label,
-              style: const TextStyle(
-                color: Colors.white,
-                fontSize: 13,
-                fontWeight: FontWeight.w400,
-              ),
-              textAlign: TextAlign.center,
+ 
+                // ── Scientific toggle ──────────────────────────────
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.end,
+                    children: [
+                      GestureDetector(
+                        onTap: () => setState(() => _isScientific = !_isScientific),
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
+                          decoration: BoxDecoration(
+                            color: _isScientific ? _orange : const Color(0xFF2A2A2A),
+                            borderRadius: BorderRadius.circular(20),
+                          ),
+                          child: Text(
+                            _isScientific ? 'Scientific ON' : 'Scientific',
+                            style: const TextStyle(
+                                color: Colors.white, fontSize: 12, fontWeight: FontWeight.w500),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+ 
+                // ── Scientific rows ───────────────────────────────
+                if (_isScientific) ...[
+                  _sciRow(['2ⁿᵈ', 'x²', 'x³', 'xʸ', 'eˣ', '10ˣ']),
+                  const SizedBox(height: 6),
+                  _sciRow(['1/x', '√x', 'ln', 'log', 'sin', 'cos']),
+                  const SizedBox(height: 6),
+                  _sciRow(['(', ')', 'tan', 'π', 'e', 'Rand']),
+                  const SizedBox(height: 10),
+                ],
+ 
+                // ── Main buttons ──────────────────────────────────
+                Expanded(
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(_kGap, 0, _kGap, _kGap),
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                      children: [
+                        _mainRow(['AC', '+/-', '%', '÷']),
+                        _mainRow(['7', '8', '9', '×']),
+                        _mainRow(['4', '5', '6', '-']),
+                        _mainRow(['1', '2', '3', '+']),
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            _btn('0', wide: true),
+                            _btn('.'),
+                            _btn('='),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
             ),
           ),
         ),
       ),
     );
   }
-
-  Widget _buildMainButton(String label) {
-    Color bgColor;
-    Color textColor = Colors.white;
-    bool isWide = label == '0';
-
+ 
+  Widget _sciRow(List<String> labels) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: _kGap),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: labels.map((l) => GestureDetector(
+          onTap: () => _tap(l),
+          child: Container(
+            height: _kSciBtnH,
+            // Each of 6 keys gets equal space; subtract gaps
+            width: (420 - _kGap * 2 - 5 * 6.0) / 6,
+            decoration: BoxDecoration(
+                color: _sciColor, borderRadius: BorderRadius.circular(8)),
+            alignment: Alignment.center,
+            child: Text(l,
+                style: const TextStyle(
+                    color: Colors.white, fontSize: _kSciBtnFont, fontWeight: FontWeight.w400),
+                textAlign: TextAlign.center),
+          ),
+        )).toList(),
+      ),
+    );
+  }
+ 
+  Widget _mainRow(List<String> labels) {
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+      children: labels.map((l) => _btn(l)).toList(),
+    );
+  }
+ 
+  Widget _btn(String label, {bool wide = false}) {
+    Color bg;
+    Color fg = Colors.white;
     if (label == 'AC' || label == '+/-' || label == '%') {
-      bgColor = const Color(0xFFA5A5A5);
-      textColor = Colors.black;
-    } else if (label == '÷' || label == '×' || label == '-' || label == '+' || label == '=') {
-      bgColor = const Color(0xFFFF9F0A);
+      bg = _light; fg = Colors.black;
+    } else if ('÷×-+='.contains(label) && label.isNotEmpty) {
+      bg = _orange;
     } else {
-      bgColor = const Color(0xFF333333);
+      bg = _dark;
     }
-
-    return Expanded(
-      flex: isWide ? 2 : 1,
-      child: GestureDetector(
-        onTap: () => label == '×' ? _handleXPress() : _handleButton(label),
-        child: Container(
-          margin: const EdgeInsets.all(4),
-          decoration: BoxDecoration(
-            color: bgColor,
-            borderRadius: BorderRadius.circular(50),
-          ),
-          child: Center(
-            child: Text(
-              label,
-              style: TextStyle(
-                color: textColor,
-                fontSize: label == '0' ? 28 : 32,
-                fontWeight: FontWeight.w400,
-              ),
-            ),
-          ),
+ 
+    return GestureDetector(
+      onTap: () => label == '×' ? _handleXPress() : _tap(label),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 60),
+        width:  wide ? _kBtnSize * 2 + _kGap : _kBtnSize,
+        height: _kBtnSize,
+        decoration: BoxDecoration(
+          color: bg,
+          shape: wide ? BoxShape.rectangle : BoxShape.circle,
+          borderRadius: wide ? BorderRadius.circular(_kBtnSize / 2) : null,
         ),
+        alignment: wide ? Alignment.centerLeft : Alignment.center,
+        padding: wide ? const EdgeInsets.only(left: _kBtnSize * 0.34) : EdgeInsets.zero,
+        child: Text(label,
+            style: TextStyle(
+              color: fg,
+              fontSize: _kBtnFont,
+              fontWeight: FontWeight.w400,
+            )),
       ),
     );
   }
 }
+ 
