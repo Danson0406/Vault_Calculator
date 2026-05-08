@@ -144,27 +144,33 @@ class EncryptionService {
   /// Encrypts [sourceFile] and writes it into the [category] subdirectory.
   /// Returns the path of the written .venc file.
   static Future<String> importFile({
-    required File sourceFile,
-    required String originalName,
-    required String category,
-  }) async {
-    final dir = await vaultDir();
-    final catDir = Directory('${dir.path}/$category');
-    if (!await catDir.exists()) await catDir.create(recursive: true);
+  required File sourceFile,
+  required String originalName,
+  required String category,
+}) async {
 
-    final bytes = await sourceFile.readAsBytes();
-    final encBytes = await encrypt(bytes);
+  if (_sessionKey == null) throw Exception('Vault locked');
 
-    // Sanitise the filename so it is safe on all platforms
-    final safe = originalName.replaceAll(RegExp(r'[^\w.\-]'), '_');
-    final ts = DateTime.now().millisecondsSinceEpoch;
-    final random = Random.secure().nextInt(999999);
+  // ✅ COPY FILE INTO MEMORY (breaks link to gallery file)
+  final bytes = await sourceFile.readAsBytes();
 
-    final path = '${catDir.path}/${ts}_$random.vault';
+  // 🔐 Encrypt independent copy
+  final encBytes = await encrypt(bytes);
 
-    await File(path).writeAsBytes(encBytes);
-    return path;
+  final dir = await vaultDir();
+  final catDir = Directory('${dir.path}/$category');
+
+  if (!await catDir.exists()) {
+    await catDir.create(recursive: true);
   }
+
+  final id = DateTime.now().millisecondsSinceEpoch.toString();
+  final path = '${catDir.path}/$id.vault';
+
+  await File(path).writeAsBytes(encBytes, flush: true);
+
+  return path;
+}
 
   /// Decrypts the file at [encPath] to a temp location and returns that path.
   static Future<String> exportForViewing(String encPath) async {
@@ -179,7 +185,7 @@ class EncryptionService {
         .split('__')
         .skip(1)
         .join('__')
-        .replaceAll('.venc', '');
+        .replaceAll('.vault', '');
 
     final out =
     '${tmp.path}/${DateTime.now().millisecondsSinceEpoch}.tmp';
@@ -218,12 +224,38 @@ class EncryptionService {
     return list;
   }
 
+  //This is my latest revision
+  static Future<String> importRawFile({
+  required Uint8List data,
+  required String originalName,
+  required String category,
+  }) async {
+  final dir = await vaultDir();
+  final catDir = Directory('${dir.path}/$category');
+  if (!await catDir.exists()) {
+    await catDir.create(recursive: true);
+  }
+
+  final encBytes = await encrypt(data);
+
+  final safe = originalName.replaceAll(RegExp(r'[^\w.\-]'), '_');
+  final ts = DateTime.now().millisecondsSinceEpoch;
+  final random = Random.secure().nextInt(999999);
+
+  final path = '${catDir.path}/${ts}_$random.vault';
+
+  await File(path).writeAsBytes(encBytes);
+  return path;
+  }
+
   /// Permanently deletes the encrypted file at [path].
   static Future<void> deleteFile(String path) async {
     final f = File(path);
     if (await f.exists()) await f.delete();
   }
 }
+
+
 
 // ─────────────────────────────
 // MODEL
@@ -250,3 +282,4 @@ class VaultFile {
     return '${(sizeBytes / (1024 * 1024)).toStringAsFixed(1)} MB';
   }
 }
+  

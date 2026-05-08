@@ -80,29 +80,27 @@ class _VaultFolderDetailScreenState extends State<VaultFolderDetailScreen> {
     final errors = <String>[];
 
     for (final picked in result.files) {
-      final path = picked.path;
-      if (path == null) {
-        errors.add('${picked.name}: no path available');
-        continue;
-      }
+  final path = picked.path;
 
-      final file = File(path);
-      if (!await file.exists()) {
-        errors.add('${picked.name}: file not found');
-        continue;
-      }
+  if (path == null) {
+    errors.add('${picked.name}: no path available');
+    continue;
+  }
 
-      try {
-        await EncryptionService.importFile(
-          sourceFile: file,
-          originalName: picked.name,
-          category: widget.categoryKey,
-        );
-        imported++;
-      } catch (e) {
-        errors.add('${picked.name}: $e');
-      }
-    }
+  try {
+    final bytes = await File(path).readAsBytes();
+
+    await EncryptionService.importRawFile(
+      data: bytes,
+      originalName: picked.name,
+      category: widget.categoryKey,
+    );
+
+    imported++;
+  } catch (e) {
+    errors.add('${picked.name}: $e');
+  }
+}
 
     // 3. Refresh the list
     await _loadFiles();
