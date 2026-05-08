@@ -5,163 +5,26 @@ import 'package:flutter/material.dart';
 import 'package:open_filex/open_filex.dart';
 
 import 'encryption_service.dart';
-import 'vault_session.dart';
 
-class VaultFolderDetailScreen extends StatelessWidget {
+class VaultFolderDetailScreen extends StatefulWidget {
   final String folderName;
+  final String categoryKey; // disk subfolder name passed from VaultFoldersScreen
 
   const VaultFolderDetailScreen({
     super.key,
     required this.folderName,
-  });
-
-  static const List<_Cat> _categories = [
-    _Cat('Images', 'images', Icons.image_outlined),
-    _Cat('Documents', 'documents', Icons.insert_drive_file_outlined),
-    _Cat('Videos', 'videos', Icons.video_library_outlined),
-    _Cat('Audios', 'audios', Icons.music_note),
-  ];
-
-  void _openCategory(BuildContext context, _Cat cat) {
-    Navigator.of(context).push(
-      MaterialPageRoute(
-        builder: (_) => VaultCategoryScreen(
-          folderName: folderName,
-          category: cat,
-        ),
-      ),
-    );
-  }
-
-  Future<void> _showAddMenu(BuildContext context) async {
-    final selected = await showModalBottomSheet<_Cat>(
-      context: context,
-      backgroundColor: Colors.white,
-      builder: (context) {
-        return SafeArea(
-          child: Padding(
-            padding: const EdgeInsets.all(16),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: _categories.map((cat) {
-                return ListTile(
-                  leading: Icon(cat.icon, color: Colors.black),
-                  title: Text('Add ${cat.label}'),
-                  onTap: () => Navigator.of(context).pop(cat),
-                );
-              }).toList(),
-            ),
-          ),
-        );
-      },
-    );
-
-    if (selected != null && context.mounted) {
-      _openCategory(context, selected);
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: Colors.white,
-      body: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                children: [
-                  IconButton(
-                    onPressed: () => Navigator.of(context).pop(),
-                    icon: const Icon(Icons.arrow_back, size: 18),
-                  ),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          folderName,
-                          style: const TextStyle(
-                            color: Colors.black,
-                            fontSize: 12,
-                            fontWeight: FontWeight.w800,
-                          ),
-                        ),
-                        const Text(
-                          'Categories',
-                          style: TextStyle(
-                            color: Colors.black,
-                            fontSize: 8,
-                            fontWeight: FontWeight.w500,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  IconButton(
-                    onPressed: () => _showAddMenu(context),
-                    icon: const Icon(Icons.add, size: 22),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 34),
-              Expanded(
-                child: GridView.count(
-                  crossAxisCount: 2,
-                  mainAxisSpacing: 34,
-                  crossAxisSpacing: 18,
-                  childAspectRatio: 1.8,
-                  children: _categories.map((cat) {
-                    return GestureDetector(
-                      onTap: () => _openCategory(context, cat),
-                      child: Row(
-                        children: [
-                          Icon(cat.icon, size: 25, color: Colors.black),
-                          const SizedBox(width: 12),
-                          Text(
-                            cat.label,
-                            style: const TextStyle(
-                              color: Colors.black,
-                              fontSize: 11,
-                              fontWeight: FontWeight.w700,
-                            ),
-                          ),
-                        ],
-                      ),
-                    );
-                  }).toList(),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class VaultCategoryScreen extends StatefulWidget {
-  final String folderName;
-  final _Cat category;
-
-  const VaultCategoryScreen({
-    super.key,
-    required this.folderName,
-    required this.category,
+    required this.categoryKey,
   });
 
   @override
-  State<VaultCategoryScreen> createState() => _VaultCategoryScreenState();
+  State<VaultFolderDetailScreen> createState() =>
+      _VaultFolderDetailScreenState();
 }
 
-class _VaultCategoryScreenState extends State<VaultCategoryScreen> {
+class _VaultFolderDetailScreenState extends State<VaultFolderDetailScreen> {
   List<VaultFile> _files = [];
   bool _loading = false;
-
-  String get _categoryKey =>
-      '${_safeName(widget.folderName)}_${widget.category.key}';
+  bool _initialLoad = true;
 
   @override
   void initState() {
@@ -169,193 +32,378 @@ class _VaultCategoryScreenState extends State<VaultCategoryScreen> {
     _loadFiles();
   }
 
-  String _safeName(String value) {
-    return value.replaceAll(RegExp(r'[^a-zA-Z0-9_]'), '_');
-  }
+  // ── Load ──────────────────────────────────────────────────────
 
   Future<void> _loadFiles() async {
-    final files = await EncryptionService.listFiles(_categoryKey);
-    if (!mounted) return;
-    setState(() => _files = files);
+    try {
+      final files = await EncryptionService.listFiles(widget.categoryKey);
+      if (mounted) {
+        setState(() {
+          _files = files;
+          _initialLoad = false;
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() => _initialLoad = false);
+        _showError('Could not load files: $e');
+      }
+    }
   }
 
+  // ── Import ────────────────────────────────────────────────────
+
   Future<void> _importFiles() async {
-    if (!VaultSession.isUnlocked) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Vault is locked. Log in again.')),
-      );
+    // 1. Guard: vault must be unlocked
+    if (!EncryptionService.isUnlocked) {
+      _showError('Vault is locked. Please log in again.');
       return;
     }
 
-    final result = await FilePicker.platform.pickFiles(allowMultiple: true);
-    if (result == null) return;
+    // 2. Open the system file picker (no type filter = any file)
+    FilePickerResult? result;
+    try {
+      result = await FilePicker.platform.pickFiles(
+        allowMultiple: true,
+        type: FileType.any,
+      );
+    } catch (e) {
+      _showError('File picker error: $e');
+      return;
+    }
+
+    if (result == null || result.files.isEmpty) return; // user cancelled
 
     setState(() => _loading = true);
 
-    try {
-      for (final picked in result.files) {
-        if (picked.path == null) continue;
+    int imported = 0;
+    final errors = <String>[];
 
-        await EncryptionService.importFile(
-          sourceFile: File(picked.path!),
-          originalName: picked.name,
-          category: _categoryKey,
-        );
+    for (final picked in result.files) {
+      final path = picked.path;
+      if (path == null) {
+        errors.add('${picked.name}: no path available');
+        continue;
       }
 
-      await _loadFiles();
-    } catch (error) {
-      if (!mounted) return;
+      final file = File(path);
+      if (!await file.exists()) {
+        errors.add('${picked.name}: file not found');
+        continue;
+      }
+
+      try {
+        await EncryptionService.importFile(
+          sourceFile: file,
+          originalName: picked.name,
+          category: widget.categoryKey,
+        );
+        imported++;
+      } catch (e) {
+        errors.add('${picked.name}: $e');
+      }
+    }
+
+    // 3. Refresh the list
+    await _loadFiles();
+
+    if (!mounted) return;
+    setState(() => _loading = false);
+
+    // 4. Show result
+    if (errors.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Import failed: $error')),
+        SnackBar(
+          content: Text(imported == 1
+              ? '1 file imported successfully'
+              : '$imported files imported successfully'),
+          behavior: SnackBarBehavior.floating,
+        ),
       );
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            imported > 0
+                ? '$imported imported, ${errors.length} failed:\n${errors.join('\n')}'
+                : 'Import failed:\n${errors.join('\n')}',
+          ),
+          behavior: SnackBarBehavior.floating,
+          duration: const Duration(seconds: 6),
+        ),
+      );
+    }
+  }
+
+  // ── Open (decrypt + view) ─────────────────────────────────────
+
+  Future<void> _openFile(VaultFile f) async {
+    if (!EncryptionService.isUnlocked) {
+      _showError('Vault is locked. Please log in again.');
+      return;
+    }
+
+    setState(() => _loading = true);
+    try {
+      final tmpPath = await EncryptionService.exportForViewing(f.encPath);
+      final result = await OpenFilex.open(tmpPath);
+
+      if (result.type != ResultType.done && mounted) {
+        _showError('Cannot open this file type: ${result.message}');
+      }
+
+      // Auto-delete temp file after 2 minutes
+      Future.microtask(() async {
+      await Future.delayed(const Duration(seconds: 10));
+
+  try {
+    final f = File(tmpPath);
+    if (await f.exists()) {
+      await f.delete();
+    }
+    } catch (_) {}
+    });
+    } catch (e) {
+      if (mounted) _showError('Could not open file: $e');
     } finally {
       if (mounted) setState(() => _loading = false);
     }
   }
 
-  Future<void> _openFile(VaultFile file) async {
-    if (!VaultSession.isUnlocked) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Vault is locked. Log in again.')),
-      );
-      return;
-    }
+  // ── Delete file ───────────────────────────────────────────────
 
-    try {
-      final path = await EncryptionService.exportForViewing(file.encPath);
-      await OpenFilex.open(path);
-
-      Future.delayed(const Duration(minutes: 2), () {
-        File(path).delete().catchError((_) {});
-      });
-    } catch (error) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Could not open file: $error')),
-      );
-    }
-  }
-
-  Future<void> _deleteFile(VaultFile file) async {
-    final ok = await showDialog<bool>(
+  Future<void> _deleteFile(VaultFile f) async {
+    final confirmed = await showDialog<bool>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Delete File?'),
-        content: Text('Delete "${file.displayName}"?'),
+      builder: (ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Text('Delete File?',
+            style: TextStyle(fontWeight: FontWeight.w700)),
+        content: Text('Delete "${f.displayName}"? This cannot be undone.'),
         actions: [
           TextButton(
-            onPressed: () => Navigator.of(context).pop(false),
-            child: const Text('Cancel'),
-          ),
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancel')),
           TextButton(
-            onPressed: () => Navigator.of(context).pop(true),
-            child: const Text('Delete', style: TextStyle(color: Colors.red)),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Delete',
+                style: TextStyle(
+                    color: Colors.red, fontWeight: FontWeight.w600)),
           ),
         ],
       ),
     );
 
-    if (ok == true) {
-      await EncryptionService.deleteFile(file.encPath);
-      await _loadFiles();
+    if (confirmed != true) return;
+
+    try {
+      await EncryptionService.deleteFile(f.encPath);
+      await _loadFiles(); // refresh
+    } catch (e) {
+      if (mounted) _showError('Could not delete file: $e');
     }
   }
+
+  // ── Helpers ───────────────────────────────────────────────────
+
+  void _showError(String msg) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(msg),
+        backgroundColor: Colors.red.shade700,
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
+  }
+
+  // ── Build ─────────────────────────────────────────────────────
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: Colors.white,
-      floatingActionButton: FloatingActionButton(
-        backgroundColor: Colors.black,
-        foregroundColor: Colors.white,
-        onPressed: _importFiles,
-        child: const Icon(Icons.add),
-      ),
-      body: SafeArea(
-        child: Stack(
-          children: [
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      IconButton(
-                        onPressed: () => Navigator.of(context).pop(),
-                        icon: const Icon(Icons.arrow_back, size: 18),
-                      ),
-                      Expanded(
-                        child: Text(
-                          widget.category.label,
-                          style: const TextStyle(
-                            color: Colors.black,
-                            fontSize: 22,
-                            fontWeight: FontWeight.w900,
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 16),
-                  Expanded(
-                    child: _files.isEmpty
-                        ? const Center(
-                            child: Text(
-                              'No files yet',
-                              style: TextStyle(color: Colors.black54),
-                            ),
-                          )
-                        : ListView.separated(
-                            itemCount: _files.length,
-                            separatorBuilder: (_, __) =>
-                                const Divider(height: 1),
-                            itemBuilder: (context, index) {
-                              final file = _files[index];
-
-                              return ListTile(
-                                leading: Icon(
-                                  widget.category.icon,
-                                  color: Colors.black,
-                                ),
-                                title: Text(
-                                  file.displayName,
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                ),
-                                subtitle: Text(file.sizeLabel),
-                                onTap: () => _openFile(file),
-                                trailing: IconButton(
-                                  onPressed: () => _deleteFile(file),
-                                  icon: const Icon(
-                                    Icons.delete_outline,
-                                    color: Colors.red,
-                                  ),
-                                ),
-                              );
-                            },
-                          ),
-                  ),
-                ],
-              ),
-            ),
-            if (_loading)
-              Container(
-                color: Colors.white.withOpacity(0.65),
-                child: const Center(child: CircularProgressIndicator()),
-              ),
-          ],
+      appBar: AppBar(
+        backgroundColor: Colors.white,
+        elevation: 0,
+        leading: IconButton(
+          icon: const Icon(Icons.arrow_back_ios_new_rounded,
+              size: 18, color: Colors.black),
+          onPressed: () => Navigator.of(context).pop(),
         ),
+        title: Text(
+          widget.folderName,
+          style: const TextStyle(
+              fontSize: 18,
+              fontWeight: FontWeight.w700,
+              color: Colors.black),
+        ),
+        actions: [
+          // Import button in the top-right corner
+          Padding(
+            padding: const EdgeInsets.only(right: 8),
+            child: IconButton(
+              onPressed: _loading ? null : _importFiles,
+              icon: _loading
+                  ? const SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(
+                          strokeWidth: 2, color: Colors.black),
+                    )
+                  : const Icon(Icons.upload_rounded,
+                      color: Colors.black, size: 22),
+              tooltip: 'Import files',
+            ),
+          ),
+        ],
+      ),
+      body: _initialLoad
+          ? const Center(child: CircularProgressIndicator())
+          : _files.isEmpty
+              ? _EmptyState(onImport: _importFiles)
+              : RefreshIndicator(
+                  onRefresh: _loadFiles,
+                  child: ListView.builder(
+                    padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
+                    itemCount: _files.length,
+                    itemBuilder: (ctx, i) {
+                      final f = _files[i];
+                      return _FileTile(
+                        file: f,
+                        onTap: () => _openFile(f),
+                        onDelete: () => _deleteFile(f),
+                      );
+                    },
+                  ),
+                ),
+    );
+  }
+}
+
+// ── Empty state ───────────────────────────────────────────────
+
+class _EmptyState extends StatelessWidget {
+  final VoidCallback onImport;
+
+  const _EmptyState({required this.onImport});
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.folder_open_rounded,
+              size: 64, color: Colors.grey.shade300),
+          const SizedBox(height: 14),
+          Text('No files yet',
+              style: TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.w600,
+                  color: Colors.grey.shade400)),
+          const SizedBox(height: 6),
+          Text('Tap the import button to add files',
+              style: TextStyle(fontSize: 13, color: Colors.grey.shade400)),
+          const SizedBox(height: 24),
+          ElevatedButton.icon(
+            onPressed: onImport,
+            icon: const Icon(Icons.upload_rounded, size: 18),
+            label: const Text('Import Files'),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.black,
+              foregroundColor: Colors.white,
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(24)),
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+              elevation: 0,
+            ),
+          ),
+        ],
       ),
     );
   }
 }
 
-class _Cat {
-  final String label;
-  final String key;
-  final IconData icon;
+// ── File tile ─────────────────────────────────────────────────
 
-  const _Cat(this.label, this.key, this.icon);
+class _FileTile extends StatelessWidget {
+  final VaultFile file;
+  final VoidCallback onTap;
+  final VoidCallback onDelete;
+
+  const _FileTile({
+    required this.file,
+    required this.onTap,
+    required this.onDelete,
+  });
+
+  IconData get _icon {
+    final ext = file.displayName.split('.').last.toLowerCase();
+    if (['jpg', 'jpeg', 'png', 'gif', 'heic', 'webp'].contains(ext)) {
+      return Icons.image_outlined;
+    }
+    if (['mp4', 'mov', 'avi', 'mkv'].contains(ext)) {
+      return Icons.video_file_outlined;
+    }
+    if (['mp3', 'aac', 'wav', 'm4a'].contains(ext)) {
+      return Icons.audio_file_outlined;
+    }
+    if (['pdf'].contains(ext)) return Icons.picture_as_pdf_outlined;
+    if (['doc', 'docx'].contains(ext)) return Icons.description_outlined;
+    return Icons.insert_drive_file_outlined;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 10),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(14),
+        boxShadow: [
+          BoxShadow(
+              color: Colors.black.withOpacity(0.05),
+              blurRadius: 8,
+              offset: const Offset(0, 2)),
+        ],
+      ),
+      child: ListTile(
+        onTap: onTap,
+        contentPadding:
+            const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+        leading: Container(
+          width: 44,
+          height: 44,
+          decoration: BoxDecoration(
+              color: const Color(0xFFF2F2F2),
+              borderRadius: BorderRadius.circular(12)),
+          child: Icon(_icon, color: Colors.black54, size: 22),
+        ),
+        title: Text(
+          file.displayName,
+          style: const TextStyle(
+              fontWeight: FontWeight.w600,
+              fontSize: 14,
+              color: Colors.black87),
+          overflow: TextOverflow.ellipsis,
+        ),
+        subtitle: Text(
+          '${file.sizeLabel}  •  ${_formatDate(file.modified)}',
+          style: TextStyle(color: Colors.grey.shade400, fontSize: 11),
+        ),
+        trailing: IconButton(
+          icon: const Icon(Icons.delete_outline,
+              color: Colors.redAccent, size: 20),
+          tooltip: 'Delete file',
+          onPressed: onDelete,
+        ),
+      ),
+    );
+  }
+
+  String _formatDate(DateTime d) {
+    return '${d.day}/${d.month}/${d.year}';
+  }
 }

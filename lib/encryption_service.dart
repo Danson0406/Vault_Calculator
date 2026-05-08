@@ -3,253 +3,250 @@ import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
 
-import 'package:crypto/crypto.dart';
 import 'package:encrypt/encrypt.dart' as enc;
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:path_provider/path_provider.dart';
-
-class VaultFile {
-  final String displayName;
-  final String encPath;
-  final int size;
-
-  const VaultFile({
-    required this.displayName,
-    required this.encPath,
-    required this.size,
-  });
-
-  String get sizeLabel {
-    if (size < 1024) return '$size B';
-    if (size < 1024 * 1024) return '${(size / 1024).toStringAsFixed(1)} KB';
-    return '${(size / (1024 * 1024)).toStringAsFixed(1)} MB';
-  }
-}
+import 'package:pointycastle/export.dart';
 
 class EncryptionService {
-  static const FlutterSecureStorage _storage = FlutterSecureStorage();
-
-  static const String _saltKey = 'vault_salt';
-  static const String _verifierKey = 'vault_verifier';
+  static const _storage = FlutterSecureStorage();
+  static const _keyStorage = 'vault_meta';
 
   static enc.Key? _sessionKey;
 
-  static bool get isUnlocked => _sessionKey != null;
+  // ─────────────────────────────
+  // KEY DERIVATION
+  // ─────────────────────────────
 
-  static Future<Directory> vaultDir() async {
-    final base = await getApplicationDocumentsDirectory();
-    final dir = Directory('${base.path}/vault_files');
+  static Uint8List _deriveKey(String pin, Uint8List salt) {
+    final d = PBKDF2KeyDerivator(HMac(SHA256Digest(), 64));
+    d.init(Pbkdf2Parameters(salt, 100000, 32));
+    return d.process(Uint8List.fromList(utf8.encode(pin)));
+  }
 
-    if (!await dir.exists()) {
-      await dir.create(recursive: true);
+  static Uint8List _hmac(Uint8List key, List<int> data) {
+    final h = HMac(SHA256Digest(), 64)..init(KeyParameter(key));
+    return h.process(Uint8List.fromList(data));
+  }
+
+  static bool _constantEquals(List<int> a, List<int> b) {
+    if (a.length != b.length) return false;
+    int r = 0;
+    for (int i = 0; i < a.length; i++) {
+      r |= a[i] ^ b[i];
     }
-
-    return dir;
+    return r == 0;
   }
 
-  static List<int> _randomBytes(int length) {
-    final random = Random.secure();
-    return List<int>.generate(length, (_) => random.nextInt(256));
+  static Uint8List _random(int len) {
+    final r = Random.secure();
+    return Uint8List.fromList(List.generate(len, (_) => r.nextInt(256)));
   }
 
-  static List<int> _deriveKey(String pin, List<int> salt) {
-    var data = utf8.encode(pin) + salt;
+  // ─────────────────────────────
+  // INIT VAULT
+  // ─────────────────────────────
 
-    for (int i = 0; i < 10000; i++) {
-      data = sha256.convert(data).bytes;
-    }
-
-    return data;
-  }
-
-  static String _verifier(List<int> keyBytes) {
-    return base64Encode(sha256.convert(keyBytes).bytes);
-  }
-
+  /// Derives a key from [pin], stores the salt + HMAC verifier,
+  /// and sets the in-memory session key so the vault is immediately usable.
   static Future<void> initKey(String pin) async {
-    final salt = _randomBytes(16);
-    final keyBytes = _deriveKey(pin, salt);
+    final salt = _random(16);
+    final key = _deriveKey(pin, salt);
+    final verifier = _hmac(key, utf8.encode('vault-check'));
 
-    await _storage.write(key: _saltKey, value: base64Encode(salt));
-    await _storage.write(key: _verifierKey, value: _verifier(keyBytes));
+    await _storage.write(
+      key: _keyStorage,
+      value: jsonEncode({
+        'salt': base64.encode(salt),
+        'verifier': base64.encode(verifier),
+      }),
+    );
 
-    _sessionKey = enc.Key(Uint8List.fromList(keyBytes));
+    _sessionKey = enc.Key(key);
   }
 
+  // ─────────────────────────────
+  // UNLOCK
+  // ─────────────────────────────
+
+  /// Verifies [pin] against the stored HMAC. Sets the session key on success.
+  /// Throws on wrong PIN or uninitialised vault.
   static Future<void> unlock(String pin) async {
-    final saltText = await _storage.read(key: _saltKey);
-    final verifierText = await _storage.read(key: _verifierKey);
+    final raw = await _storage.read(key: _keyStorage);
+    if (raw == null) throw Exception('Vault not initialized');
 
-    if (saltText == null || verifierText == null) {
-      throw Exception('Vault is not set up.');
+    final data = jsonDecode(raw) as Map<String, dynamic>;
+    final salt = base64.decode(data['salt'] as String);
+    final storedVerifier = base64.decode(data['verifier'] as String);
+
+    final keyBytes = _deriveKey(pin, Uint8List.fromList(salt));
+    final check = _hmac(keyBytes, utf8.encode('vault-check'));
+
+    if (!_constantEquals(storedVerifier, check)) {
+      throw Exception('Invalid PIN');
     }
 
-    final salt = base64Decode(saltText);
-    final keyBytes = _deriveKey(pin, salt);
-    final check = _verifier(keyBytes);
-
-    if (check != verifierText) {
-      throw Exception('Wrong PIN.');
-    }
-
-    _sessionKey = enc.Key(Uint8List.fromList(keyBytes));
+    _sessionKey = enc.Key(keyBytes);
   }
 
-  static void lock() {
-    _sessionKey = null;
-  }
+  // ─────────────────────────────
+  // LOCK / DELETE
+  // ─────────────────────────────
+
+  static void lock() => _sessionKey = null;
 
   static Future<void> deleteKey() async {
     _sessionKey = null;
-    await _storage.delete(key: _saltKey);
-    await _storage.delete(key: _verifierKey);
+    await _storage.delete(key: _keyStorage);
   }
 
-  static String _safeName(String name) {
-    return name.replaceAll(RegExp(r'[\\/:*?"<>|]'), '_');
+  static bool get isUnlocked => _sessionKey != null;
+
+  // ─────────────────────────────
+  // ENCRYPT / DECRYPT
+  // ─────────────────────────────
+
+  static Future<Uint8List> encrypt(Uint8List data) async {
+    if (_sessionKey == null) throw Exception('Vault locked');
+
+    final iv = enc.IV.fromSecureRandom(12);
+    final encrypter = enc.Encrypter(enc.AES(_sessionKey!, mode: enc.AESMode.gcm));
+    final encrypted = encrypter.encryptBytes(data, iv: iv);
+
+    // Layout: [12-byte IV][ciphertext + 16-byte GCM tag]
+    return Uint8List.fromList([...iv.bytes, ...encrypted.bytes]);
   }
 
-  static Future<void> importFile({
+  static Future<Uint8List> decrypt(Uint8List data) async {
+    if (_sessionKey == null) throw Exception('Vault locked');
+
+    final iv = enc.IV(data.sublist(0, 12));
+    final body = data.sublist(12);
+
+    final encrypter = enc.Encrypter(enc.AES(_sessionKey!, mode: enc.AESMode.gcm));
+    final decrypted = encrypter.decryptBytes(enc.Encrypted(body), iv: iv);
+
+    return Uint8List.fromList(decrypted);
+  }
+
+  // ─────────────────────────────
+  // FILE SYSTEM
+  // ─────────────────────────────
+
+  /// Base vault directory — public so folder screens can delete category dirs.
+  static Future<Directory> vaultDir() async {
+    final base = await getApplicationDocumentsDirectory();
+    final dir = Directory('${base.path}/vault_files');
+    if (!await dir.exists()) await dir.create(recursive: true);
+    return dir;
+  }
+
+  /// Encrypts [sourceFile] and writes it into the [category] subdirectory.
+  /// Returns the path of the written .venc file.
+  static Future<String> importFile({
     required File sourceFile,
     required String originalName,
     required String category,
   }) async {
-    final key = _sessionKey;
-
-    if (key == null) {
-      throw Exception('Vault is locked.');
-    }
+    final dir = await vaultDir();
+    final catDir = Directory('${dir.path}/$category');
+    if (!await catDir.exists()) await catDir.create(recursive: true);
 
     final bytes = await sourceFile.readAsBytes();
-    final iv = enc.IV.fromSecureRandom(16);
-    final encrypter = enc.Encrypter(enc.AES(key));
+    final encBytes = await encrypt(bytes);
 
-    final encrypted = encrypter.encryptBytes(bytes, iv: iv);
+    // Sanitise the filename so it is safe on all platforms
+    final safe = originalName.replaceAll(RegExp(r'[^\w.\-]'), '_');
+    final ts = DateTime.now().millisecondsSinceEpoch;
+    final random = Random.secure().nextInt(999999);
 
-    final root = await vaultDir();
-    final categoryDir = Directory('${root.path}/$category');
+    final path = '${catDir.path}/${ts}_$random.vault';
 
-    if (!await categoryDir.exists()) {
-      await categoryDir.create(recursive: true);
-    }
-
-    final timestamp = DateTime.now().millisecondsSinceEpoch;
-    final safeOriginal = _safeName(originalName);
-    final encryptedPath = '${categoryDir.path}/${timestamp}_$safeOriginal.vault';
-    final metaPath = '$encryptedPath.meta';
-
-    await File(encryptedPath).writeAsBytes([
-      ...iv.bytes,
-      ...encrypted.bytes,
-    ]);
-
-    await File(metaPath).writeAsString(
-      jsonEncode({
-        'originalName': originalName,
-        'size': bytes.length,
-        'createdAt': DateTime.now().toIso8601String(),
-      }),
-    );
+    await File(path).writeAsBytes(encBytes);
+    return path;
   }
 
-  static Future<List<VaultFile>> listFiles(String category) async {
-    final root = await vaultDir();
-    final categoryDir = Directory('${root.path}/$category');
-
-    if (!await categoryDir.exists()) {
-      return [];
-    }
-
-    final items = categoryDir
-        .listSync()
-        .whereType<File>()
-        .where((file) => file.path.endsWith('.vault'))
-        .toList();
-
-    final files = <VaultFile>[];
-
-    for (final file in items) {
-      String name = file.uri.pathSegments.last.replaceAll('.vault', '');
-      int size = await file.length();
-
-      final meta = File('${file.path}.meta');
-
-      if (await meta.exists()) {
-        try {
-          final data = jsonDecode(await meta.readAsString());
-          name = data['originalName'] ?? name;
-          size = data['size'] ?? size;
-        } catch (_) {}
-      }
-
-      files.add(
-        VaultFile(
-          displayName: name,
-          encPath: file.path,
-          size: size,
-        ),
-      );
-    }
-
-    files.sort((a, b) => b.encPath.compareTo(a.encPath));
-    return files;
-  }
-
+  /// Decrypts the file at [encPath] to a temp location and returns that path.
   static Future<String> exportForViewing(String encPath) async {
-    final key = _sessionKey;
+    final bytes = await File(encPath).readAsBytes();
+    final decrypted = await decrypt(bytes);
 
-    if (key == null) {
-      throw Exception('Vault is locked.');
-    }
+    final tmp = await getTemporaryDirectory();
+    // Recover the original filename: strip timestamp prefix and .venc suffix
+    final name = encPath
+        .split('/')
+        .last
+        .split('__')
+        .skip(1)
+        .join('__')
+        .replaceAll('.venc', '');
 
-    final file = File(encPath);
-    final allBytes = await file.readAsBytes();
-
-    if (allBytes.length <= 16) {
-      throw Exception('Invalid encrypted file.');
-    }
-
-    final ivBytes = allBytes.sublist(0, 16);
-    final encryptedBytes = allBytes.sublist(16);
-
-    final iv = enc.IV(Uint8List.fromList(ivBytes));
-    final encrypter = enc.Encrypter(enc.AES(key));
-
-    final decrypted = encrypter.decryptBytes(
-      enc.Encrypted(Uint8List.fromList(encryptedBytes)),
-      iv: iv,
-    );
-
-    String originalName = 'vault_file';
-
-    final meta = File('$encPath.meta');
-
-    if (await meta.exists()) {
-      try {
-        final data = jsonDecode(await meta.readAsString());
-        originalName = data['originalName'] ?? originalName;
-      } catch (_) {}
-    }
-
-    final temp = await getTemporaryDirectory();
-    final safeOriginal = _safeName(originalName);
-    final outPath =
-        '${temp.path}/${DateTime.now().millisecondsSinceEpoch}_$safeOriginal';
-
-    await File(outPath).writeAsBytes(decrypted);
-    return outPath;
+    final out =
+    '${tmp.path}/${DateTime.now().millisecondsSinceEpoch}.tmp';
+      await File(out).writeAsBytes(decrypted);
+      return out;
   }
 
-  static Future<void> deleteFile(String encPath) async {
-    final file = File(encPath);
-    final meta = File('$encPath.meta');
+  /// Lists all encrypted files inside [category].
+  static Future<List<VaultFile>> listFiles(String category) async {
+    final dir = await vaultDir();
+    final catDir = Directory('${dir.path}/$category');
+    if (!await catDir.exists()) return [];
 
-    if (await file.exists()) {
-      await file.delete();
+    final list = <VaultFile>[];
+    await for (final entity in catDir.list()) {
+      if (entity is File && entity.path.endsWith('.vault')) {
+        final stat = await entity.stat();
+        final rawName = entity.path.split('/').last;
+        // Strip timestamp prefix + .venc suffix to get the original filename
+        final displayName = rawName
+            .split('__')
+            .skip(1)
+            .join('__')
+            .replaceAll('.venc', '');
+
+        list.add(VaultFile(
+          encPath: entity.path,
+          displayName: displayName,
+          sizeBytes: stat.size,
+          modified: stat.modified,
+        ));
+      }
     }
 
-    if (await meta.exists()) {
-      await meta.delete();
+    list.sort((a, b) => b.modified.compareTo(a.modified)); // newest first
+    return list;
+  }
+
+  /// Permanently deletes the encrypted file at [path].
+  static Future<void> deleteFile(String path) async {
+    final f = File(path);
+    if (await f.exists()) await f.delete();
+  }
+}
+
+// ─────────────────────────────
+// MODEL
+// ─────────────────────────────
+
+class VaultFile {
+  final String encPath;
+  final String displayName;
+  final int sizeBytes;
+  final DateTime modified;
+
+  const VaultFile({
+    required this.encPath,
+    required this.displayName,
+    required this.sizeBytes,
+    required this.modified,
+  });
+
+  String get sizeLabel {
+    if (sizeBytes < 1024) return '$sizeBytes B';
+    if (sizeBytes < 1024 * 1024) {
+      return '${(sizeBytes / 1024).toStringAsFixed(1)} KB';
     }
+    return '${(sizeBytes / (1024 * 1024)).toStringAsFixed(1)} MB';
   }
 }
