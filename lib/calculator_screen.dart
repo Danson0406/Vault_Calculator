@@ -16,9 +16,13 @@ class CalculatorScreen extends StatefulWidget {
 
 class _CalculatorScreenState extends State<CalculatorScreen> {
   String _display = 'Value';
+
   double? _firstNumber;
   String? _operator;
   bool _resetNext = false;
+
+  // This counts how many times the red x button is pressed.
+  int _xPressCount = 0;
 
   static const Color _screenBg = Color(0xFF303030);
   static const Color _displayBg = Color(0xFF111111);
@@ -43,14 +47,47 @@ class _CalculatorScreenState extends State<CalculatorScreen> {
     HapticFeedback.heavyImpact();
 
     final isSetup = await VaultService.isVaultSetup();
+
     if (!mounted) return;
 
     Navigator.of(context).push(
       MaterialPageRoute(
-        builder: (_) =>
-            isSetup ? const VaultPinLoginScreen() : const VaultWelcomeScreen(),
+        builder: (_) {
+          if (isSetup) {
+            return const VaultPinLoginScreen();
+          } else {
+            return const VaultWelcomeScreen();
+          }
+        },
       ),
     );
+  }
+
+  void _handleXButton() {
+    setState(() {
+      _xPressCount++;
+
+      if (_xPressCount == 1) {
+        _display = 'x';
+      } else if (_xPressCount == 2) {
+        _display = 'x x';
+      } else if (_xPressCount >= 3) {
+        _display = 'Opening Vault...';
+        _xPressCount = 0;
+      }
+    });
+
+    if (_display == 'Opening Vault...') {
+      Future.delayed(const Duration(milliseconds: 300), () {
+        if (mounted) {
+          _openVault();
+        }
+      });
+    }
+  }
+
+  void _resetXCounter() {
+    _xPressCount = 0;
   }
 
   void _tap(String key) {
@@ -58,10 +95,14 @@ class _CalculatorScreenState extends State<CalculatorScreen> {
 
     if (key.isEmpty) return;
 
+    // Secret vault trigger:
+    // User must press the red x button 3 times.
     if (key == 'x') {
-      _openVault();
+      _handleXButton();
       return;
     }
+
+    _resetXCounter();
 
     setState(() {
       switch (key) {
@@ -73,7 +114,7 @@ class _CalculatorScreenState extends State<CalculatorScreen> {
           break;
 
         case '⌫':
-          if (_display == 'Value' || _display.length <= 1) {
+          if (_display == 'Value' || _display == 'Error' || _display.length <= 1) {
             _display = 'Value';
           } else {
             _display = _display.substring(0, _display.length - 1);
@@ -169,7 +210,7 @@ class _CalculatorScreenState extends State<CalculatorScreen> {
 
         case '(':
         case ')':
-          // Visual only for the Figma scientific layout.
+          // These are only for the scientific calculator design.
           break;
 
         default:
@@ -219,6 +260,7 @@ class _CalculatorScreenState extends State<CalculatorScreen> {
     }
 
     int result = 1;
+
     for (int i = 2; i <= value.toInt(); i++) {
       result *= i;
     }
@@ -228,18 +270,22 @@ class _CalculatorScreenState extends State<CalculatorScreen> {
 
   String _format(double value) {
     if (value.isNaN || value.isInfinite) return 'Error';
+
     if (value == value.truncateToDouble() && value.abs() < 1000000000) {
       return value.toInt().toString();
     }
+
     return double.parse(value.toStringAsFixed(8)).toString();
   }
 
   Color _buttonColor(String key) {
     if (key == 'AC') return _yellow;
     if (key == 'x') return _red;
+
     if (key == '=' || key == '÷' || key == '×' || key == '−' || key == '+') {
       return _keyDark;
     }
+
     return _keyBg;
   }
 
@@ -261,6 +307,7 @@ class _CalculatorScreenState extends State<CalculatorScreen> {
               child: Column(
                 children: [
                   const Spacer(),
+
                   Container(
                     width: double.infinity,
                     height: 82,
@@ -284,25 +331,28 @@ class _CalculatorScreenState extends State<CalculatorScreen> {
                       ),
                     ),
                   ),
+
                   const SizedBox(height: 12),
+
                   const Align(
                     alignment: Alignment.centerLeft,
                     child: Text(
-                      'Press red X button to enter Vault',
+                      'Press red x button 3 times to open Vault',
                       style: TextStyle(
                         color: Color(0xFFCFCFCF),
                         fontSize: 12,
                       ),
                     ),
                   ),
+
                   const SizedBox(height: 12),
+
                   Expanded(
                     flex: 5,
                     child: GridView.builder(
                       physics: const NeverScrollableScrollPhysics(),
                       itemCount: _keys.length,
-                      gridDelegate:
-                          const SliverGridDelegateWithFixedCrossAxisCount(
+                      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
                         crossAxisCount: 5,
                         crossAxisSpacing: 8,
                         mainAxisSpacing: 8,
@@ -311,7 +361,9 @@ class _CalculatorScreenState extends State<CalculatorScreen> {
                       itemBuilder: (context, index) {
                         final key = _keys[index];
 
-                        if (key.isEmpty) return const SizedBox.shrink();
+                        if (key.isEmpty) {
+                          return const SizedBox.shrink();
+                        }
 
                         return GestureDetector(
                           onTap: () => _tap(key),
