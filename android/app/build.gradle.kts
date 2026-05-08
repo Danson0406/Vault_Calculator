@@ -20,7 +20,7 @@ android {
     }
 
     defaultConfig {
-    applicationId = "com.example.vault_calculator"
+    applicationId = "com.example.scientific_calculator"
 
     minSdk = flutter.minSdkVersion
     targetSdk = flutter.targetSdkVersion
