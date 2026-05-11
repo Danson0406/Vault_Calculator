@@ -47,8 +47,6 @@ class EncryptionService {
   // INIT VAULT
   // ─────────────────────────────
 
-  /// Derives a key from [pin], stores the salt + HMAC verifier,
-  /// and sets the in-memory session key so the vault is immediately usable.
   static Future<void> initKey(String pin) async {
     final salt = _random(16);
     final key = _deriveKey(pin, salt);
@@ -62,6 +60,7 @@ class EncryptionService {
       }),
     );
 
+    // Session key is set immediately so vault is ready after setup
     _sessionKey = enc.Key(key);
   }
 
@@ -69,8 +68,6 @@ class EncryptionService {
   // UNLOCK
   // ─────────────────────────────
 
-  /// Verifies [pin] against the stored HMAC. Sets the session key on success.
-  /// Throws on wrong PIN or uninitialised vault.
   static Future<void> unlock(String pin) async {
     final raw = await _storage.read(key: _keyStorage);
     if (raw == null) throw Exception('Vault not initialized');
@@ -90,11 +87,13 @@ class EncryptionService {
   }
 
   // ─────────────────────────────
-  // LOCK / DELETE
+  // LOCK / DELETE KEY
   // ─────────────────────────────
 
   static void lock() => _sessionKey = null;
 
+  /// Clears the in-memory session key and removes the stored
+  /// salt/verifier from secure storage. Required by VaultService.resetVault().
   static Future<void> deleteKey() async {
     _sessionKey = null;
     await _storage.delete(key: _keyStorage);
@@ -110,7 +109,9 @@ class EncryptionService {
     if (_sessionKey == null) throw Exception('Vault locked');
 
     final iv = enc.IV.fromSecureRandom(12);
-    final encrypter = enc.Encrypter(enc.AES(_sessionKey!, mode: enc.AESMode.gcm));
+    final encrypter =
+        enc.Encrypter(enc.AES(_sessionKey!, mode: enc.AESMode.gcm));
+
     final encrypted = encrypter.encryptBytes(data, iv: iv);
 
     // Layout: [12-byte IV][ciphertext + 16-byte GCM tag]
@@ -123,17 +124,19 @@ class EncryptionService {
     final iv = enc.IV(data.sublist(0, 12));
     final body = data.sublist(12);
 
-    final encrypter = enc.Encrypter(enc.AES(_sessionKey!, mode: enc.AESMode.gcm));
-    final decrypted = encrypter.decryptBytes(enc.Encrypted(body), iv: iv);
+    final encrypter =
+        enc.Encrypter(enc.AES(_sessionKey!, mode: enc.AESMode.gcm));
 
-    return Uint8List.fromList(decrypted);
+    return Uint8List.fromList(
+      encrypter.decryptBytes(enc.Encrypted(body), iv: iv),
+    );
   }
 
   // ─────────────────────────────
   // FILE SYSTEM
   // ─────────────────────────────
 
-  /// Base vault directory — public so folder screens can delete category dirs.
+  /// Base vault directory. Public so folder screens can delete category dirs.
   static Future<Directory> vaultDir() async {
     final base = await getApplicationDocumentsDirectory();
     final dir = Directory('${base.path}/vault_files');
@@ -141,59 +144,56 @@ class EncryptionService {
     return dir;
   }
 
-  /// Encrypts [sourceFile] and writes it into the [category] subdirectory.
-  /// Returns the path of the written .venc file.
-  static Future<String> importFile({
-  required File sourceFile,
-  required String originalName,
-  required String category,
-}) async {
+  /// Encrypts [data] and writes into [category] subfolder.
+  ///
+  /// Filename format: {timestamp}_{random}__{originalName}.vault
+  /// The original name is embedded after `__` so we can recover it later
+  /// for display and so the OS knows which app to open the file with.
+  static Future<String> importRawFile({
+    required Uint8List data,
+    required String originalName,
+    required String category,
+  }) async {
+    final dir = await vaultDir();
+    final catDir = Directory('${dir.path}/$category');
+    if (!await catDir.exists()) await catDir.create(recursive: true);
 
-  if (_sessionKey == null) throw Exception('Vault locked');
+    final encBytes = await encrypt(data);
 
-  // ✅ COPY FILE INTO MEMORY (breaks link to gallery file)
-  final bytes = await sourceFile.readAsBytes();
+    final ts = DateTime.now().millisecondsSinceEpoch;
+    final rnd = Random.secure().nextInt(999999);
+    // Sanitise so the name is safe on all platforms
+    final safeName = originalName.replaceAll(RegExp(r'[^\w.\-]'), '_');
+    final path = '${catDir.path}/${ts}_${rnd}__$safeName.vault';
 
-  // 🔐 Encrypt independent copy
-  final encBytes = await encrypt(bytes);
-
-  final dir = await vaultDir();
-  final catDir = Directory('${dir.path}/$category');
-
-  if (!await catDir.exists()) {
-    await catDir.create(recursive: true);
+    await File(path).writeAsBytes(encBytes, flush: true);
+    return path;
   }
 
-  final id = DateTime.now().millisecondsSinceEpoch.toString();
-  final path = '${catDir.path}/$id.vault';
-
-  await File(path).writeAsBytes(encBytes, flush: true);
-
-  return path;
-}
-
-  /// Decrypts the file at [encPath] to a temp location and returns that path.
+  /// Decrypts the file at [encPath] to a temp file and returns the temp path.
+  /// The original filename (with its extension) is recovered from [encPath]
+  /// so that the OS opens it with the right app.
   static Future<String> exportForViewing(String encPath) async {
     final bytes = await File(encPath).readAsBytes();
     final decrypted = await decrypt(bytes);
 
     final tmp = await getTemporaryDirectory();
-    // Recover the original filename: strip timestamp prefix and .venc suffix
-    final name = encPath
-        .split('/')
-        .last
-        .split('__')
-        .skip(1)
-        .join('__')
-        .replaceAll('.vault', '');
 
+    // Recover original filename: everything after the first `__`, minus `.vault`
+    final storedName = encPath.split('/').last;
+    final sepIdx = storedName.indexOf('__');
+    final originalName = sepIdx != -1
+        ? storedName.substring(sepIdx + 2).replaceAll('.vault', '')
+        : storedName.replaceAll('.vault', '');
+
+    // Prefix with timestamp so multiple opens don't collide
     final out =
-    '${tmp.path}/${DateTime.now().millisecondsSinceEpoch}.tmp';
-      await File(out).writeAsBytes(decrypted);
-      return out;
+        '${tmp.path}/${DateTime.now().millisecondsSinceEpoch}_$originalName';
+    await File(out).writeAsBytes(decrypted, flush: true);
+    return out;
   }
 
-  /// Lists all encrypted files inside [category].
+  /// Lists all .vault files in [category], newest first.
   static Future<List<VaultFile>> listFiles(String category) async {
     final dir = await vaultDir();
     final catDir = Directory('${dir.path}/$category');
@@ -203,13 +203,13 @@ class EncryptionService {
     await for (final entity in catDir.list()) {
       if (entity is File && entity.path.endsWith('.vault')) {
         final stat = await entity.stat();
-        final rawName = entity.path.split('/').last;
-        // Strip timestamp prefix + .venc suffix to get the original filename
-        final displayName = rawName
-            .split('__')
-            .skip(1)
-            .join('__')
-            .replaceAll('.venc', '');
+        final storedName = entity.path.split('/').last;
+
+        // Recover display name from embedded original name
+        final sepIdx = storedName.indexOf('__');
+        final displayName = sepIdx != -1
+            ? storedName.substring(sepIdx + 2).replaceAll('.vault', '')
+            : storedName.replaceAll('.vault', '');
 
         list.add(VaultFile(
           encPath: entity.path,
@@ -220,32 +220,8 @@ class EncryptionService {
       }
     }
 
-    list.sort((a, b) => b.modified.compareTo(a.modified)); // newest first
+    list.sort((a, b) => b.modified.compareTo(a.modified));
     return list;
-  }
-
-  //This is my latest revision
-  static Future<String> importRawFile({
-  required Uint8List data,
-  required String originalName,
-  required String category,
-  }) async {
-  final dir = await vaultDir();
-  final catDir = Directory('${dir.path}/$category');
-  if (!await catDir.exists()) {
-    await catDir.create(recursive: true);
-  }
-
-  final encBytes = await encrypt(data);
-
-  final safe = originalName.replaceAll(RegExp(r'[^\w.\-]'), '_');
-  final ts = DateTime.now().millisecondsSinceEpoch;
-  final random = Random.secure().nextInt(999999);
-
-  final path = '${catDir.path}/${ts}_$random.vault';
-
-  await File(path).writeAsBytes(encBytes);
-  return path;
   }
 
   /// Permanently deletes the encrypted file at [path].
@@ -254,8 +230,6 @@ class EncryptionService {
     if (await f.exists()) await f.delete();
   }
 }
-
-
 
 // ─────────────────────────────
 // MODEL
@@ -282,4 +256,3 @@ class VaultFile {
     return '${(sizeBytes / (1024 * 1024)).toStringAsFixed(1)} MB';
   }
 }
-  

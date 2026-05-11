@@ -5,7 +5,6 @@ import 'package:flutter/material.dart';
 
 import 'encryption_service.dart';
 import 'vault_folders_screen.dart';
-import 'vault_session.dart';
 
 class VaultHomeScreen extends StatefulWidget {
   const VaultHomeScreen({super.key});
@@ -22,63 +21,88 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
   void _openMenu() => _scaffoldKey.currentState?.openDrawer();
 
   void _selectPage(int index) {
-    Navigator.of(context).pop();
+    Navigator.of(context).pop(); // close drawer
     setState(() => _pageIndex = index);
   }
 
   void _exitVault() {
-    VaultSession.clear();
-    Navigator.of(context).pop();
+    EncryptionService.lock(); // wipe session key from memory
     Navigator.of(context).popUntil((route) => route.isFirst);
   }
 
-  // ── Import handler (shown only on the Home tab) ──────────────
+  // ── Import (Home tab FAB) ────────────────────────────────────
   Future<void> _importFiles() async {
-    if (!VaultSession.isUnlocked) return;
+    // Guard: session key must be set
+    if (!EncryptionService.isUnlocked) {
+      _showSnack('Vault is locked. Please log in again.');
+      return;
+    }
 
-    final res = await FilePicker.platform.pickFiles(allowMultiple: true);
-    if (res == null || !mounted) return;
+    FilePickerResult? res;
+    try {
+      res = await FilePicker.platform.pickFiles(
+        allowMultiple: true,
+        type: FileType.any,
+      );
+    } catch (e) {
+      _showSnack('Could not open file picker: $e');
+      return;
+    }
+
+    if (res == null || res.files.isEmpty || !mounted) return;
 
     setState(() => _importing = true);
-    try {
-      await Future.wait(
-        res.files.map((f) async {
-          if (f.path == null) return;
-          // Default category is 'documents'; users can use the Files tab
-          // to import into a specific folder category instead.
-          await EncryptionService.importFile(
-            sourceFile: File(f.path!),
-            originalName: f.name,
-            category: 'documents',
-          );
-        }),
-      );
 
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              res.files.length == 1
-                  ? '1 file imported'
-                  : '${res.files.length} files imported',
-            ),
-            behavior: SnackBarBehavior.floating,
-          ),
-        );
+    int imported = 0;
+    final errors = <String>[];
+
+    for (final picked in res.files) {
+      final path = picked.path;
+      if (path == null) {
+        errors.add('${picked.name}: path unavailable');
+        continue;
       }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Import failed: $e'),
-            behavior: SnackBarBehavior.floating,
-          ),
+      try {
+        final bytes = await File(path).readAsBytes();
+        // importRawFile is the correct method name in EncryptionService
+        await EncryptionService.importRawFile(
+          data: bytes,
+          originalName: picked.name,
+          category: 'general', // home imports go to a shared 'general' folder
         );
+        imported++;
+      } catch (e) {
+        errors.add('${picked.name}: $e');
       }
-    } finally {
-      if (mounted) setState(() => _importing = false);
+    }
+
+    if (!mounted) return;
+    setState(() => _importing = false);
+
+    if (errors.isEmpty) {
+      _showSnack(imported == 1
+          ? '1 file imported'
+          : '$imported files imported');
+    } else {
+      _showSnack(
+        imported > 0
+            ? '$imported imported, ${errors.length} failed'
+            : 'Import failed: ${errors.first}',
+        isError: true,
+      );
     }
   }
+
+  void _showSnack(String msg, {bool isError = false}) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(msg),
+      backgroundColor: isError ? Colors.red.shade700 : null,
+      behavior: SnackBarBehavior.floating,
+    ));
+  }
+
+  // ── Build ─────────────────────────────────────────────────────
 
   @override
   Widget build(BuildContext context) {
@@ -99,7 +123,6 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
       ),
     ];
 
-    // Show the import FAB only on the Home tab
     final showFab = _pageIndex == 0;
 
     return Scaffold(
@@ -116,9 +139,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
                       width: 22,
                       height: 22,
                       child: CircularProgressIndicator(
-                        color: Colors.white,
-                        strokeWidth: 2,
-                      ),
+                          color: Colors.white, strokeWidth: 2),
                     )
                   : const Icon(Icons.upload_rounded, color: Colors.white),
             )
@@ -161,7 +182,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
                   onTap: () => _selectPage(3),
                 ),
                 _DrawerItem(
-                  icon: Icons.person_outline,
+                  icon: Icons.logout,
                   label: 'Exit',
                   onTap: _exitVault,
                 ),
@@ -199,10 +220,7 @@ class _DrawerItem extends StatelessWidget {
       title: Text(
         label,
         style: const TextStyle(
-          color: Colors.black,
-          fontSize: 11,
-          fontWeight: FontWeight.w500,
-        ),
+            color: Colors.black, fontSize: 11, fontWeight: FontWeight.w500),
       ),
       onTap: onTap,
     );
@@ -215,7 +233,6 @@ class _DrawerItem extends StatelessWidget {
 
 class _HomeWelcomePage extends StatelessWidget {
   final VoidCallback onMenuTap;
-
   const _HomeWelcomePage({required this.onMenuTap});
 
   @override
@@ -226,27 +243,21 @@ class _HomeWelcomePage extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // Top bar
             Row(
               children: [
                 IconButton(
-                  onPressed: onMenuTap,
-                  icon: const Icon(Icons.menu, size: 18),
-                ),
+                    onPressed: onMenuTap,
+                    icon: const Icon(Icons.menu, size: 18)),
                 const Text(
                   'Vault',
                   style: TextStyle(
-                    fontSize: 22,
-                    fontWeight: FontWeight.w900,
-                    color: Color(0xFF1B1B1B),
-                  ),
+                      fontSize: 22,
+                      fontWeight: FontWeight.w900,
+                      color: Color(0xFF1B1B1B)),
                 ),
               ],
             ),
-
             const SizedBox(height: 20),
-
-            // Vault status card
             Container(
               width: double.infinity,
               padding: const EdgeInsets.all(18),
@@ -259,26 +270,18 @@ class _HomeWelcomePage extends StatelessWidget {
                 children: [
                   Icon(Icons.lock, color: Colors.white, size: 20),
                   SizedBox(height: 10),
-                  Text(
-                    'Vault secured',
-                    style: TextStyle(
-                      color: Colors.white,
-                      fontSize: 16,
-                      fontWeight: FontWeight.w700,
-                    ),
-                  ),
+                  Text('Vault secured',
+                      style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 16,
+                          fontWeight: FontWeight.w700)),
                   SizedBox(height: 6),
-                  Text(
-                    'Your files are safely hidden',
-                    style: TextStyle(color: Colors.white70, fontSize: 12),
-                  ),
+                  Text('Your files are safely hidden',
+                      style: TextStyle(color: Colors.white70, fontSize: 12)),
                 ],
               ),
             ),
-
             const Spacer(),
-
-            // Subtle branding hint — FAB floats above via Scaffold
             const Center(
               child: Text(
                 'Everything here stays private',
@@ -293,7 +296,7 @@ class _HomeWelcomePage extends StatelessWidget {
 }
 
 // ─────────────────────────────
-// GENERIC PLACEHOLDER PAGE
+// PLACEHOLDER PAGE
 // ─────────────────────────────
 
 class _SimplePage extends StatelessWidget {
@@ -320,17 +323,13 @@ class _SimplePage extends StatelessWidget {
             Row(
               children: [
                 IconButton(
-                  onPressed: onMenuTap,
-                  icon: const Icon(Icons.menu, size: 18),
-                ),
-                Text(
-                  title,
-                  style: const TextStyle(
-                    fontSize: 26,
-                    fontWeight: FontWeight.w900,
-                    color: Color(0xFF1B1B1B),
-                  ),
-                ),
+                    onPressed: onMenuTap,
+                    icon: const Icon(Icons.menu, size: 18)),
+                Text(title,
+                    style: const TextStyle(
+                        fontSize: 26,
+                        fontWeight: FontWeight.w900,
+                        color: Color(0xFF1B1B1B))),
               ],
             ),
             const Spacer(),

@@ -8,7 +8,7 @@ import 'encryption_service.dart';
 
 class VaultFolderDetailScreen extends StatefulWidget {
   final String folderName;
-  final String categoryKey; // disk subfolder name passed from VaultFoldersScreen
+  final String categoryKey;
 
   const VaultFolderDetailScreen({
     super.key,
@@ -54,13 +54,11 @@ class _VaultFolderDetailScreenState extends State<VaultFolderDetailScreen> {
   // ── Import ────────────────────────────────────────────────────
 
   Future<void> _importFiles() async {
-    // 1. Guard: vault must be unlocked
     if (!EncryptionService.isUnlocked) {
       _showError('Vault is locked. Please log in again.');
       return;
     }
 
-    // 2. Open the system file picker (no type filter = any file)
     FilePickerResult? result;
     try {
       result = await FilePicker.platform.pickFiles(
@@ -68,11 +66,11 @@ class _VaultFolderDetailScreenState extends State<VaultFolderDetailScreen> {
         type: FileType.any,
       );
     } catch (e) {
-      _showError('File picker error: $e');
+      _showError('Could not open file picker: $e');
       return;
     }
 
-    if (result == null || result.files.isEmpty) return; // user cancelled
+    if (result == null || result.files.isEmpty) return;
 
     setState(() => _loading = true);
 
@@ -80,56 +78,37 @@ class _VaultFolderDetailScreenState extends State<VaultFolderDetailScreen> {
     final errors = <String>[];
 
     for (final picked in result.files) {
-  final path = picked.path;
+      final path = picked.path;
+      if (path == null) {
+        errors.add('${picked.name}: path unavailable');
+        continue;
+      }
+      try {
+        final bytes = await File(path).readAsBytes();
+        await EncryptionService.importRawFile(
+          data: bytes,
+          originalName: picked.name,
+          category: widget.categoryKey,
+        );
+        imported++;
+      } catch (e) {
+        errors.add('${picked.name}: $e');
+      }
+    }
 
-  if (path == null) {
-    errors.add('${picked.name}: no path available');
-    continue;
-  }
-
-  try {
-    final bytes = await File(path).readAsBytes();
-
-    await EncryptionService.importRawFile(
-      data: bytes,
-      originalName: picked.name,
-      category: widget.categoryKey,
-    );
-
-    imported++;
-  } catch (e) {
-    errors.add('${picked.name}: $e');
-  }
-}
-
-    // 3. Refresh the list
-    await _loadFiles();
+    await _loadFiles(); // refresh list
 
     if (!mounted) return;
     setState(() => _loading = false);
 
-    // 4. Show result
     if (errors.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(imported == 1
-              ? '1 file imported successfully'
-              : '$imported files imported successfully'),
-          behavior: SnackBarBehavior.floating,
-        ),
-      );
+      _showSnack(imported == 1
+          ? '1 file imported successfully'
+          : '$imported files imported successfully');
     } else {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            imported > 0
-                ? '$imported imported, ${errors.length} failed:\n${errors.join('\n')}'
-                : 'Import failed:\n${errors.join('\n')}',
-          ),
-          behavior: SnackBarBehavior.floating,
-          duration: const Duration(seconds: 6),
-        ),
-      );
+      _showError(imported > 0
+          ? '$imported imported, ${errors.length} failed'
+          : 'Import failed: ${errors.first}');
     }
   }
 
@@ -147,20 +126,13 @@ class _VaultFolderDetailScreenState extends State<VaultFolderDetailScreen> {
       final result = await OpenFilex.open(tmpPath);
 
       if (result.type != ResultType.done && mounted) {
-        _showError('Cannot open this file type: ${result.message}');
+        _showError('Cannot open file: ${result.message}');
       }
 
       // Auto-delete temp file after 2 minutes
-      Future.microtask(() async {
-      await Future.delayed(const Duration(seconds: 10));
-
-  try {
-    final f = File(tmpPath);
-    if (await f.exists()) {
-      await f.delete();
-    }
-    } catch (_) {}
-    });
+      Future.delayed(const Duration(minutes: 2), () {
+        File(tmpPath).delete().catchError((_) {});
+      });
     } catch (e) {
       if (mounted) _showError('Could not open file: $e');
     } finally {
@@ -174,10 +146,12 @@ class _VaultFolderDetailScreenState extends State<VaultFolderDetailScreen> {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        shape:
+            RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
         title: const Text('Delete File?',
             style: TextStyle(fontWeight: FontWeight.w700)),
-        content: Text('Delete "${f.displayName}"? This cannot be undone.'),
+        content:
+            Text('Delete "${f.displayName}"?\nThis cannot be undone.'),
         actions: [
           TextButton(
               onPressed: () => Navigator.pop(ctx, false),
@@ -196,23 +170,29 @@ class _VaultFolderDetailScreenState extends State<VaultFolderDetailScreen> {
 
     try {
       await EncryptionService.deleteFile(f.encPath);
-      await _loadFiles(); // refresh
+      await _loadFiles();
     } catch (e) {
-      if (mounted) _showError('Could not delete file: $e');
+      if (mounted) _showError('Could not delete: $e');
     }
   }
 
   // ── Helpers ───────────────────────────────────────────────────
 
+  void _showSnack(String msg) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(msg),
+      behavior: SnackBarBehavior.floating,
+    ));
+  }
+
   void _showError(String msg) {
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(msg),
-        backgroundColor: Colors.red.shade700,
-        behavior: SnackBarBehavior.floating,
-      ),
-    );
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(msg),
+      backgroundColor: Colors.red.shade700,
+      behavior: SnackBarBehavior.floating,
+    ));
   }
 
   // ── Build ─────────────────────────────────────────────────────
@@ -237,21 +217,19 @@ class _VaultFolderDetailScreenState extends State<VaultFolderDetailScreen> {
               color: Colors.black),
         ),
         actions: [
-          // Import button in the top-right corner
           Padding(
             padding: const EdgeInsets.only(right: 8),
             child: IconButton(
               onPressed: _loading ? null : _importFiles,
+              tooltip: 'Import files',
               icon: _loading
                   ? const SizedBox(
                       width: 18,
                       height: 18,
                       child: CircularProgressIndicator(
-                          strokeWidth: 2, color: Colors.black),
-                    )
+                          strokeWidth: 2, color: Colors.black))
                   : const Icon(Icons.upload_rounded,
                       color: Colors.black, size: 22),
-              tooltip: 'Import files',
             ),
           ),
         ],
@@ -265,25 +243,23 @@ class _VaultFolderDetailScreenState extends State<VaultFolderDetailScreen> {
                   child: ListView.builder(
                     padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
                     itemCount: _files.length,
-                    itemBuilder: (ctx, i) {
-                      final f = _files[i];
-                      return _FileTile(
-                        file: f,
-                        onTap: () => _openFile(f),
-                        onDelete: () => _deleteFile(f),
-                      );
-                    },
+                    itemBuilder: (ctx, i) => _FileTile(
+                      file: _files[i],
+                      onTap: () => _openFile(_files[i]),
+                      onDelete: () => _deleteFile(_files[i]),
+                    ),
                   ),
                 ),
     );
   }
 }
 
-// ── Empty state ───────────────────────────────────────────────
+// ─────────────────────────────
+// EMPTY STATE
+// ─────────────────────────────
 
 class _EmptyState extends StatelessWidget {
   final VoidCallback onImport;
-
   const _EmptyState({required this.onImport});
 
   @override
@@ -301,8 +277,9 @@ class _EmptyState extends StatelessWidget {
                   fontWeight: FontWeight.w600,
                   color: Colors.grey.shade400)),
           const SizedBox(height: 6),
-          Text('Tap the import button to add files',
-              style: TextStyle(fontSize: 13, color: Colors.grey.shade400)),
+          Text('Tap ↑ above to import files',
+              style:
+                  TextStyle(fontSize: 13, color: Colors.grey.shade400)),
           const SizedBox(height: 24),
           ElevatedButton.icon(
             onPressed: onImport,
@@ -313,8 +290,8 @@ class _EmptyState extends StatelessWidget {
               foregroundColor: Colors.white,
               shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(24)),
-              padding:
-                  const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+              padding: const EdgeInsets.symmetric(
+                  horizontal: 24, vertical: 12),
               elevation: 0,
             ),
           ),
@@ -324,7 +301,9 @@ class _EmptyState extends StatelessWidget {
   }
 }
 
-// ── File tile ─────────────────────────────────────────────────
+// ─────────────────────────────
+// FILE TILE
+// ─────────────────────────────
 
 class _FileTile extends StatelessWidget {
   final VaultFile file;
@@ -338,17 +317,19 @@ class _FileTile extends StatelessWidget {
   });
 
   IconData get _icon {
-    final ext = file.displayName.split('.').last.toLowerCase();
+    final name = file.displayName;
+    final ext =
+        name.contains('.') ? name.split('.').last.toLowerCase() : '';
     if (['jpg', 'jpeg', 'png', 'gif', 'heic', 'webp'].contains(ext)) {
       return Icons.image_outlined;
     }
     if (['mp4', 'mov', 'avi', 'mkv'].contains(ext)) {
       return Icons.video_file_outlined;
     }
-    if (['mp3', 'aac', 'wav', 'm4a'].contains(ext)) {
+    if (['mp3', 'aac', 'wav', 'm4a', 'flac'].contains(ext)) {
       return Icons.audio_file_outlined;
     }
-    if (['pdf'].contains(ext)) return Icons.picture_as_pdf_outlined;
+    if (ext == 'pdf') return Icons.picture_as_pdf_outlined;
     if (['doc', 'docx'].contains(ext)) return Icons.description_outlined;
     return Icons.insert_drive_file_outlined;
   }
@@ -388,7 +369,7 @@ class _FileTile extends StatelessWidget {
           overflow: TextOverflow.ellipsis,
         ),
         subtitle: Text(
-          '${file.sizeLabel}  •  ${_formatDate(file.modified)}',
+          '${file.sizeLabel}  •  ${_fmt(file.modified)}',
           style: TextStyle(color: Colors.grey.shade400, fontSize: 11),
         ),
         trailing: IconButton(
@@ -401,7 +382,5 @@ class _FileTile extends StatelessWidget {
     );
   }
 
-  String _formatDate(DateTime d) {
-    return '${d.day}/${d.month}/${d.year}';
-  }
+  String _fmt(DateTime d) => '${d.day}/${d.month}/${d.year}';
 }

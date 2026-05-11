@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -6,9 +7,82 @@ import 'package:flutter/services.dart';
 import 'encryption_service.dart';
 import 'vault_folder_detail_screen.dart';
 
+// ─────────────────────────────
+// FOLDER MODEL
+// ─────────────────────────────
+
+class FolderEntry {
+  final String name;
+  final String categoryKey;
+
+  const FolderEntry({required this.name, required this.categoryKey});
+
+  Map<String, dynamic> toJson() =>
+      {'name': name, 'categoryKey': categoryKey};
+
+  factory FolderEntry.fromJson(Map<String, dynamic> j) => FolderEntry(
+        name: j['name'] as String,
+        categoryKey: j['categoryKey'] as String,
+      );
+}
+
+// ─────────────────────────────
+// PERSISTENCE HELPER
+// ─────────────────────────────
+
+class _FolderStore {
+  static const _filename = 'vault_folders.json';
+
+  static Future<File> _file() async {
+    final dir = await EncryptionService.vaultDir();
+    return File('${dir.path}/$_filename');
+  }
+
+  static Future<List<FolderEntry>> load() async {
+    try {
+      final f = await _file();
+      if (!await f.exists()) {
+        // First launch — save defaults to disk so they persist
+        final defaults = _defaults();
+        await save(defaults);
+        return defaults;
+      }
+      final raw = await f.readAsString();
+      final list = jsonDecode(raw) as List<dynamic>;
+      // ✅ Wrap in List.from() so the list is mutable (add/removeAt work)
+      return List<FolderEntry>.from(
+        list.map((e) => FolderEntry.fromJson(e as Map<String, dynamic>)),
+      );
+    } catch (_) {
+      // On any error return a fresh mutable list of defaults
+      return _defaults();
+    }
+  }
+
+  static Future<void> save(List<FolderEntry> folders) async {
+    try {
+      final f = await _file();
+      await f.writeAsString(
+        jsonEncode(folders.map((e) => e.toJson()).toList()),
+        flush: true,
+      );
+    } catch (_) {}
+  }
+
+  // ✅ Returns a regular mutable List (no const keyword)
+  static List<FolderEntry> _defaults() => [
+        const FolderEntry(name: 'Folder 1', categoryKey: 'folder_1'),
+        const FolderEntry(name: 'Folder 2', categoryKey: 'folder_2'),
+        const FolderEntry(name: 'Folder 3', categoryKey: 'folder_3'),
+      ];
+}
+
+// ─────────────────────────────
+// SCREEN
+// ─────────────────────────────
+
 class VaultFoldersScreen extends StatefulWidget {
   final VoidCallback? onMenuTap;
-
   const VaultFoldersScreen({super.key, this.onMenuTap});
 
   @override
@@ -16,21 +90,39 @@ class VaultFoldersScreen extends StatefulWidget {
 }
 
 class _VaultFoldersScreenState extends State<VaultFoldersScreen> {
-  // Each folder maps: name -> category key (used as the subfolder name on disk)
-  // We keep them in insertion order so the list is stable.
-  final List<_FolderEntry> _folders = [
-    const _FolderEntry(name: 'Folder 1', categoryKey: 'folder_1'),
-    const _FolderEntry(name: 'Folder 2', categoryKey: 'folder_2'),
-    const _FolderEntry(name: 'Folder 3', categoryKey: 'folder_3'),
+  // ✅ Explicitly typed as a mutable List — never assigned a const value
+  List<FolderEntry> _folders = [];
+  bool _loading = true;
+
+  static const _tileColors = [
+    Color(0xFFE8F4FD),
+    Color(0xFFF0F8E8),
+    Color(0xFFFFF3E8),
+    Color(0xFFF8E8F8),
+    Color(0xFFE8F8F8),
   ];
 
-  final _colors = [
-    const Color(0xFFE8F4FD),
-    const Color(0xFFF0F8E8),
-    const Color(0xFFFFF3E8),
-    const Color(0xFFF8E8F8),
-    const Color(0xFFE8F8F8),
-  ];
+  @override
+  void initState() {
+    super.initState();
+    _loadFolders();
+  }
+
+  // ── Load from disk ────────────────────────────────────────────
+
+  Future<void> _loadFolders() async {
+    final folders = await _FolderStore.load();
+    if (mounted) {
+      setState(() {
+        // ✅ Always assign a mutable copy
+        _folders = List<FolderEntry>.from(folders);
+        _loading = false;
+      });
+    }
+  }
+
+  /// Persist current list to disk immediately after every mutation.
+  Future<void> _persist() => _FolderStore.save(_folders);
 
   // ── Create ────────────────────────────────────────────────────
 
@@ -39,7 +131,8 @@ class _VaultFoldersScreenState extends State<VaultFoldersScreen> {
     final name = await showDialog<String>(
       context: context,
       builder: (ctx) => AlertDialog(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(16)),
         title: const Text('New Folder',
             style: TextStyle(fontWeight: FontWeight.w700)),
         content: TextField(
@@ -55,6 +148,7 @@ class _VaultFoldersScreenState extends State<VaultFoldersScreen> {
               borderSide: BorderSide.none,
             ),
           ),
+          onSubmitted: (v) => Navigator.pop(ctx, v.trim()),
         ),
         actions: [
           TextButton(
@@ -73,13 +167,12 @@ class _VaultFoldersScreenState extends State<VaultFoldersScreen> {
 
     HapticFeedback.lightImpact();
 
-    // Build a safe disk key from the folder name + timestamp so it's unique
-    final key =
-        '${name.toLowerCase().replaceAll(RegExp(r'[^\w]'), '_')}_${DateTime.now().millisecondsSinceEpoch}';
+    final safe = name.toLowerCase().replaceAll(RegExp(r'[^\w]'), '_');
+    final key = '${safe}_${DateTime.now().millisecondsSinceEpoch}';
 
-    setState(() {
-      _folders.add(_FolderEntry(name: name, categoryKey: key));
-    });
+    // ✅ _folders is mutable — add() works
+    setState(() => _folders.add(FolderEntry(name: name, categoryKey: key)));
+    await _persist();
   }
 
   // ── Delete ────────────────────────────────────────────────────
@@ -90,12 +183,12 @@ class _VaultFoldersScreenState extends State<VaultFoldersScreen> {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(16)),
         title: const Text('Delete Folder?',
             style: TextStyle(fontWeight: FontWeight.w700)),
         content: Text(
-          'Delete "${folder.name}" and all its files? This cannot be undone.',
-        ),
+            'Delete "${folder.name}" and all its files?\nThis cannot be undone.'),
         actions: [
           TextButton(
               onPressed: () => Navigator.pop(ctx, false),
@@ -112,39 +205,27 @@ class _VaultFoldersScreenState extends State<VaultFoldersScreen> {
 
     if (confirmed != true) return;
 
-    // Delete the actual encrypted files on disk
+    // Delete encrypted files from disk
     try {
-      final vaultDir = await EncryptionService.vaultDir();
-      final dir = Directory('${vaultDir.path}/${folder.categoryKey}');
-      if (await dir.exists()) {
-        await for (final entity in dir.list(recursive: true)) {
-          try {
-            if (entity is File) {
-            await entity.delete();
-            } else if (entity is Directory) {
-            await entity.delete(recursive: true);
-        }
-          } catch (_) {}
-        }
-
-      if (await dir.exists()) {
-        await dir.delete(recursive: true);
-    }
-      }
+      final root = await EncryptionService.vaultDir();
+      final catDir =
+          Directory('${root.path}/${folder.categoryKey}');
+      if (await catDir.exists()) await catDir.delete(recursive: true);
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Could not delete files: $e'),
-            behavior: SnackBarBehavior.floating,
-          ),
-        );
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('Could not delete files: $e'),
+          behavior: SnackBarBehavior.floating,
+        ));
       }
       return;
     }
 
     HapticFeedback.mediumImpact();
+
+    // ✅ _folders is mutable — removeAt() works
     setState(() => _folders.removeAt(index));
+    await _persist();
   }
 
   // ── Build ─────────────────────────────────────────────────────
@@ -157,14 +238,13 @@ class _VaultFoldersScreenState extends State<VaultFoldersScreen> {
         children: [
           // Header
           Padding(
-            padding: const EdgeInsets.fromLTRB(16, 8, 8, 12),
+            padding: const EdgeInsets.fromLTRB(8, 8, 8, 12),
             child: Row(
               children: [
                 if (widget.onMenuTap != null)
                   IconButton(
-                    onPressed: widget.onMenuTap,
-                    icon: const Icon(Icons.menu, size: 18),
-                  ),
+                      onPressed: widget.onMenuTap,
+                      icon: const Icon(Icons.menu, size: 18)),
                 const Text(
                   'Folders',
                   style: TextStyle(
@@ -176,12 +256,11 @@ class _VaultFoldersScreenState extends State<VaultFoldersScreen> {
                 GestureDetector(
                   onTap: _createFolder,
                   child: Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 14, vertical: 7),
                     decoration: BoxDecoration(
-                      color: Colors.black,
-                      borderRadius: BorderRadius.circular(20),
-                    ),
+                        color: Colors.black,
+                        borderRadius: BorderRadius.circular(20)),
                     child: const Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
@@ -196,47 +275,55 @@ class _VaultFoldersScreenState extends State<VaultFoldersScreen> {
                     ),
                   ),
                 ),
+                const SizedBox(width: 8),
               ],
             ),
           ),
 
-          // Folder list
+          // Body
           Expanded(
-            child: _folders.isEmpty
-                ? Center(
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(Icons.folder_outlined,
-                            size: 48, color: Colors.grey.shade300),
-                        const SizedBox(height: 12),
-                        Text('No folders yet',
-                            style: TextStyle(
-                                color: Colors.grey.shade400, fontSize: 15)),
-                      ],
-                    ),
-                  )
-                : ListView.builder(
-                    padding: const EdgeInsets.fromLTRB(16, 4, 16, 20),
-                    itemCount: _folders.length,
-                    itemBuilder: (ctx, i) {
-                      final f = _folders[i];
-                      final color = _colors[i % _colors.length];
-                      return _FolderTile(
-                        folder: f,
-                        color: color,
-                        onTap: () => Navigator.of(context).push(
-                          MaterialPageRoute(
-                            builder: (_) => VaultFolderDetailScreen(
-                              folderName: f.name,
-                              categoryKey: f.categoryKey,
-                            ),
-                          ),
+            child: _loading
+                ? const Center(child: CircularProgressIndicator())
+                : _folders.isEmpty
+                    ? Center(
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(Icons.folder_outlined,
+                                size: 48,
+                                color: Colors.grey.shade300),
+                            const SizedBox(height: 12),
+                            Text('No folders yet',
+                                style: TextStyle(
+                                    color: Colors.grey.shade400,
+                                    fontSize: 15)),
+                          ],
                         ),
-                        onDelete: () => _deleteFolder(i),
-                      );
-                    },
-                  ),
+                      )
+                    : ListView.builder(
+                        padding:
+                            const EdgeInsets.fromLTRB(16, 4, 16, 20),
+                        itemCount: _folders.length,
+                        itemBuilder: (ctx, i) {
+                          final f = _folders[i];
+                          return _FolderTile(
+                            folder: f,
+                            color: _tileColors[i % _tileColors.length],
+                            onTap: () async {
+                              await Navigator.of(context).push(
+                                MaterialPageRoute(
+                                  builder: (_) =>
+                                      VaultFolderDetailScreen(
+                                    folderName: f.name,
+                                    categoryKey: f.categoryKey,
+                                  ),
+                                ),
+                              );
+                            },
+                            onDelete: () => _deleteFolder(i),
+                          );
+                        },
+                      ),
           ),
         ],
       ),
@@ -244,10 +331,12 @@ class _VaultFoldersScreenState extends State<VaultFoldersScreen> {
   }
 }
 
-// ── Folder tile ───────────────────────────────────────────────
+// ─────────────────────────────
+// FOLDER TILE
+// ─────────────────────────────
 
 class _FolderTile extends StatelessWidget {
-  final _FolderEntry folder;
+  final FolderEntry folder;
   final Color color;
   final VoidCallback onTap;
   final VoidCallback onDelete;
@@ -281,7 +370,8 @@ class _FolderTile extends StatelessWidget {
           width: 44,
           height: 44,
           decoration: BoxDecoration(
-              color: color, borderRadius: BorderRadius.circular(12)),
+              color: color,
+              borderRadius: BorderRadius.circular(12)),
           child: const Icon(Icons.folder_rounded,
               color: Colors.black54, size: 22),
         ),
@@ -292,10 +382,9 @@ class _FolderTile extends StatelessWidget {
               fontSize: 15,
               color: Colors.black87),
         ),
-        subtitle: Text(
-          'Tap to open  •  Hold to delete',
-          style: TextStyle(color: Colors.grey.shade400, fontSize: 11),
-        ),
+        subtitle: Text('Tap to open',
+            style:
+                TextStyle(color: Colors.grey.shade400, fontSize: 11)),
         trailing: IconButton(
           icon: const Icon(Icons.delete_outline,
               color: Colors.redAccent, size: 20),
@@ -305,13 +394,4 @@ class _FolderTile extends StatelessWidget {
       ),
     );
   }
-}
-
-// ── Data class ────────────────────────────────────────────────
-
-class _FolderEntry {
-  final String name;
-  final String categoryKey; // disk subfolder name
-
-  const _FolderEntry({required this.name, required this.categoryKey});
 }
